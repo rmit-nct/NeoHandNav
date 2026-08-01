@@ -1,0 +1,5 @@
+# MediaPipe already depends on opencv-contrib-python. Pin one OpenCV wheel only.
+mediapipe==0.10.35
+opencv-contrib-python==4.13.0.92
+PyAutoGUI==0.9.54
+python-dotenv==1.2.2
