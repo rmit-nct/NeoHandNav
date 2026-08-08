@@ -1,3 +1,4 @@
+# Requires Python 3.11.x.
 # MediaPipe already depends on opencv-contrib-python. Pin one OpenCV wheel only.
 mediapipe==0.10.35
 opencv-contrib-python==4.13.0.92
