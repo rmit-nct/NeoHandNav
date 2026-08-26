@@ -71,6 +71,5 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     print("Đã đóng camera thành công.")
-
 if __name__ == "__main__":
     main()
