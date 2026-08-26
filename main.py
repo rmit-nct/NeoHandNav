@@ -46,8 +46,10 @@ def main():
                 # Kiểm tra an toàn: Đảm bảo bàn tay có đủ 21 điểm mốc
                 if len(hand) >= 21:
                     for j, finger_id in enumerate(finger_ids):
-                        x, y = hand[finger_id][1], hand[finger_id][2]
-                        print(f"Ngón {finger_names[j]}: x={x}, y={y}")
+                        # Lấy thêm biến z ở vị trí index 3
+                        x, y, z = hand[finger_id][1], hand[finger_id][2], hand[finger_id][3]
+                        # In thêm tọa độ z
+                        print(f"Ngón {finger_names[j]}: x={x}, y={y}, z={z:.4f}")
                 else:
                     print("Đang nhận diện bàn tay...")
             

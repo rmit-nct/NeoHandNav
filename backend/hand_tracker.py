@@ -31,7 +31,7 @@ class HandTracker:
         return self.detection_result
 
     def get_landmarks(self, frame, draw=True):
-        """TRẢ VỀ LIST CÁC BÀN TAY, MỖI BÀN TAY LÀ 1 LIST 21 ĐIỂM"""
+        """TRẢ VỀ LIST CÁC BÀN TAY, MỖI BÀN TAY LÀ 1 LIST 21 ĐIỂM KÈM TỌA ĐỘ X, Y, Z"""
         all_hands = []
         
         if self.detection_result and self.detection_result.hand_landmarks:
@@ -40,7 +40,8 @@ class HandTracker:
                 current_hand = []
                 for id, lm in enumerate(hand_landmarks):
                     cx, cy = int(lm.x * w), int(lm.y * h)
-                    current_hand.append([id, cx, cy])
+                    cz = lm.z  # Lấy tọa độ chiều sâu z
+                    current_hand.append([id, cx, cy, cz]) # Thêm cz vào mảng
                 
                 all_hands.append(current_hand) # Lưu bàn tay vào danh sách chung
                 
@@ -50,7 +51,7 @@ class HandTracker:
         return all_hands # Trả về list các bàn tay (có thể là [] hoặc [hand1] hoặc [hand1, hand2])
 
     def _draw_landmarks(self, frame, current_hand):
-        for id, cx, cy in current_hand:
+        for id, cx, cy, cz in current_hand:  # Cập nhật unpacking 4 biến
             cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
         
         connections = [
