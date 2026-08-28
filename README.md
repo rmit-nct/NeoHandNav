@@ -2,7 +2,7 @@
 
 NEO HandNav will be a Python desktop tool that uses webcam hand gestures to control pages, slides, and videos.
 
-> **Current status:** Camera capture and MediaPipe hand-landmark tracking are available. Gesture classification and action mapping are still team tasks.
+> **Current status:** Camera capture, hand tracking, gesture classification, safe action mapping, and the main integration loop are available. Actions start in dry-run mode.
 
 ## Project structure
 
@@ -16,6 +16,7 @@ NeoHandNav/
 |-- ui/
 |   |-- __init__.py
 |   `-- feedback_overlay.py
+|-- tests/
 |-- docs/
 |-- .env.example
 |-- .gitignore
@@ -82,7 +83,25 @@ Run the current camera and hand-landmark test.
 python main.py
 ```
 
-The program should open the webcam, draw the detected hand landmarks, and print fingertip coordinates. Press `q` in the camera window to stop it.
+The program opens the webcam, draws hand landmarks, and displays the detected gesture and action status. Press `q` in the camera window to stop it.
+
+## Current gesture controls
+
+| Gesture | Result |
+|---|---|
+| Swipe left or right | Previous or next page/slide |
+| Move an open palm up or down | Scroll up or down |
+| Move thumb and index apart/together | Zoom in or out |
+| Fist | Play or pause |
+| Point | Display recognition only |
+
+The default `ACTIONS_ENABLED=false` in `.env` is safe dry-run mode: gestures are recognized and displayed without controlling the computer. Change it to `true` only when testing OS control, then focus the browser, slides, or video you want to control. PyAutoGUI's upper-left-corner fail-safe remains enabled.
+
+Run the logic tests without opening the webcam:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Technology
 
