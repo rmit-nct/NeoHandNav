@@ -1,7 +1,7 @@
 """Rule-based hand gesture recognition for NEO HandNav.
 
-The classifier consumes the pixel-coordinate landmark format produced by
-``HandTracker.get_landmarks``: ``[landmark_id, x, y]`` for all 21 landmarks.
+The classifier consumes the landmark format produced by
+``HandTracker.get_landmarks``: ``[landmark_id, x, y, z]`` for all 21 landmarks.
 It recognizes static hand shapes and turns deliberate hand motion into events.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import acos, degrees, hypot
+from math import acos, degrees, hypot, sqrt
 from time import monotonic
 from typing import Iterable, Sequence
 
@@ -42,7 +42,8 @@ class GestureResult:
     confidence: float = 0.0
 
 
-Point = tuple[float, float]
+Point2D = tuple[float, float]
+Point3D = tuple[float, float, float]
 Landmark = Sequence[int | float]
 
 
@@ -60,6 +61,10 @@ class GestureClassifier:
         (16, 14, 13),
         (20, 18, 17),
     )
+    # MediaPipe z is normalized while Thinh's x/y output is in pixels. Scaling
+    # z relative to palm size gives depth enough weight for fingers directed
+    # toward the camera without requiring the original frame dimensions.
+    _DEPTH_GAIN = 5.0
 
     def __init__(
         self,
@@ -87,9 +92,9 @@ class GestureClassifier:
     def reset(self) -> None:
         """Clear temporal state after the tracked hand disappears."""
 
-        self._filtered_center: Point | None = None
+        self._filtered_center: Point2D | None = None
         self._filtered_pinch_ratio: float | None = None
-        self._motion_anchor: tuple[Point, float] | None = None
+        self._motion_anchor: tuple[Point2D, float] | None = None
         self._pinch_anchor: tuple[float, float] | None = None
         self._candidate = Gesture.NONE
         self._candidate_frames = 0
@@ -104,19 +109,20 @@ class GestureClassifier:
         now = monotonic() if timestamp is None else timestamp
         points = self._to_points(landmarks)
         palm_scale = max(
-            self._distance(points[0], points[9]),
-            self._distance(points[5], points[17]),
+            self._distance_2d(points[0], points[9]),
+            self._distance_2d(points[5], points[17]),
             1.0,
         )
-        center = self._average(points[index] for index in (0, 5, 9, 13, 17))
+        center_3d = self._average(points[index] for index in (0, 5, 9, 13, 17))
+        center = (center_3d[0], center_3d[1])
         center = self._ema_point(self._filtered_center, center)
         self._filtered_center = center
 
         extended = [
-            self._finger_extended(points, tip, pip, mcp)
+            self._finger_extended(points, tip, pip, mcp, palm_scale)
             for tip, pip, mcp in self._FINGERS
         ]
-        pinch_ratio = self._distance(points[4], points[8]) / palm_scale
+        pinch_ratio = self._distance_3d(points[4], points[8], palm_scale) / palm_scale
         pinch_ratio = self._ema_value(self._filtered_pinch_ratio, pinch_ratio)
         self._filtered_pinch_ratio = pinch_ratio
 
@@ -167,7 +173,7 @@ class GestureClassifier:
         self,
         *,
         raw_gesture: Gesture,
-        center: Point,
+        center: Point2D,
         palm_scale: float,
         pinch_ratio: float,
         timestamp: float,
@@ -210,7 +216,7 @@ class GestureClassifier:
             self._pinch_anchor = None
         return None
 
-    def _ema_point(self, previous: Point | None, current: Point) -> Point:
+    def _ema_point(self, previous: Point2D | None, current: Point2D) -> Point2D:
         if previous is None:
             return current
         alpha = self.ema_alpha
@@ -226,44 +232,104 @@ class GestureClassifier:
 
     @classmethod
     def _finger_extended(
-        cls, points: dict[int, Point], tip: int, pip: int, mcp: int
+        cls,
+        points: dict[int, Point3D],
+        tip: int,
+        pip: int,
+        mcp: int,
+        palm_scale: float,
     ) -> bool:
-        joint_angle = cls._angle(points[mcp], points[pip], points[tip])
-        tip_distance = cls._distance(points[0], points[tip])
-        pip_distance = cls._distance(points[0], points[pip])
-        return joint_angle >= 145.0 and tip_distance > pip_distance * 1.08
+        joint_angle_2d = cls._angle_2d(points[mcp], points[pip], points[tip])
+        tip_distance_2d = cls._distance_2d(points[0], points[tip])
+        pip_distance_2d = cls._distance_2d(points[0], points[pip])
+        extended_in_image = (
+            joint_angle_2d >= 145.0 and tip_distance_2d > pip_distance_2d * 1.08
+        )
+
+        joint_angle_3d = cls._angle_3d(
+            points[mcp], points[pip], points[tip], palm_scale
+        )
+        tip_distance_3d = cls._distance_3d(points[0], points[tip], palm_scale)
+        pip_distance_3d = cls._distance_3d(points[0], points[pip], palm_scale)
+        extended_in_depth = (
+            joint_angle_3d >= 135.0 and tip_distance_3d > pip_distance_3d * 1.05
+        )
+        return extended_in_image or extended_in_depth
 
     @staticmethod
-    def _to_points(landmarks: Sequence[Landmark]) -> dict[int, Point]:
-        points: dict[int, Point] = {}
+    def _to_points(landmarks: Sequence[Landmark]) -> dict[int, Point3D]:
+        points: dict[int, Point3D] = {}
         for landmark in landmarks:
-            if len(landmark) < 3:
-                raise ValueError("Each landmark must contain id, x, and y")
+            if len(landmark) < 4:
+                raise ValueError("Each landmark must contain id, x, y, and z")
             landmark_id = int(landmark[0])
-            points[landmark_id] = (float(landmark[1]), float(landmark[2]))
+            points[landmark_id] = (
+                float(landmark[1]),
+                float(landmark[2]),
+                float(landmark[3]),
+            )
         missing = set(range(21)) - points.keys()
         if missing:
             raise ValueError(f"Expected 21 landmarks; missing ids: {sorted(missing)}")
         return points
 
     @staticmethod
-    def _distance(first: Point, second: Point) -> float:
+    def _distance_2d(first: Point3D, second: Point3D) -> float:
         return hypot(first[0] - second[0], first[1] - second[1])
 
+    @classmethod
+    def _distance_3d(
+        cls, first: Point3D, second: Point3D, palm_scale: float
+    ) -> float:
+        depth_scale = palm_scale * cls._DEPTH_GAIN
+        dx = first[0] - second[0]
+        dy = first[1] - second[1]
+        dz = (first[2] - second[2]) * depth_scale
+        return sqrt(dx * dx + dy * dy + dz * dz)
+
     @staticmethod
-    def _average(points: Iterable[Point]) -> Point:
+    def _average(points: Iterable[Point3D]) -> Point3D:
         values = list(points)
         return (
             sum(point[0] for point in values) / len(values),
             sum(point[1] for point in values) / len(values),
+            sum(point[2] for point in values) / len(values),
         )
 
     @classmethod
-    def _angle(cls, first: Point, vertex: Point, third: Point) -> float:
+    def _angle_2d(cls, first: Point3D, vertex: Point3D, third: Point3D) -> float:
         vector_a = (first[0] - vertex[0], first[1] - vertex[1])
         vector_b = (third[0] - vertex[0], third[1] - vertex[1])
         magnitude = hypot(*vector_a) * hypot(*vector_b)
         if magnitude == 0:
             return 0.0
         cosine = (vector_a[0] * vector_b[0] + vector_a[1] * vector_b[1]) / magnitude
+        return degrees(acos(max(-1.0, min(1.0, cosine))))
+
+    @classmethod
+    def _angle_3d(
+        cls,
+        first: Point3D,
+        vertex: Point3D,
+        third: Point3D,
+        palm_scale: float,
+    ) -> float:
+        depth_scale = palm_scale * cls._DEPTH_GAIN
+        vector_a = (
+            first[0] - vertex[0],
+            first[1] - vertex[1],
+            (first[2] - vertex[2]) * depth_scale,
+        )
+        vector_b = (
+            third[0] - vertex[0],
+            third[1] - vertex[1],
+            (third[2] - vertex[2]) * depth_scale,
+        )
+        magnitude_a = sqrt(sum(value * value for value in vector_a))
+        magnitude_b = sqrt(sum(value * value for value in vector_b))
+        magnitude = magnitude_a * magnitude_b
+        if magnitude == 0:
+            return 0.0
+        dot_product = sum(a * b for a, b in zip(vector_a, vector_b))
+        cosine = dot_product / magnitude
         return degrees(acos(max(-1.0, min(1.0, cosine))))

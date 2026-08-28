@@ -6,27 +6,30 @@ from backend.gesture_classifier import Gesture, GestureClassifier
 
 
 OPEN_HAND = [
-    [0, 100, 220],
-    [1, 75, 190],
-    [2, 60, 165],
-    [3, 50, 140],
-    [4, 40, 115],
-    [5, 75, 160],
-    [6, 75, 120],
-    [7, 75, 80],
-    [8, 75, 40],
-    [9, 95, 150],
-    [10, 95, 105],
-    [11, 95, 65],
-    [12, 95, 25],
-    [13, 115, 155],
-    [14, 115, 115],
-    [15, 115, 80],
-    [16, 115, 45],
-    [17, 135, 165],
-    [18, 135, 130],
-    [19, 135, 100],
-    [20, 135, 70],
+    [landmark_id, x, y, 0.0]
+    for landmark_id, x, y in [
+        [0, 100, 220],
+        [1, 75, 190],
+        [2, 60, 165],
+        [3, 50, 140],
+        [4, 40, 115],
+        [5, 75, 160],
+        [6, 75, 120],
+        [7, 75, 80],
+        [8, 75, 40],
+        [9, 95, 150],
+        [10, 95, 105],
+        [11, 95, 65],
+        [12, 95, 25],
+        [13, 115, 155],
+        [14, 115, 115],
+        [15, 115, 80],
+        [16, 115, 45],
+        [17, 135, 165],
+        [18, 135, 130],
+        [19, 135, 100],
+        [20, 135, 70],
+    ]
 ]
 
 
@@ -36,12 +39,15 @@ def copy_hand(hand=OPEN_HAND):
 
 def fold_finger(hand, pip_id: int, dip_id: int, tip_id: int) -> None:
     pip_x, pip_y = hand[pip_id][1], hand[pip_id][2]
-    hand[dip_id][1:] = [pip_x + 8, pip_y + 20]
-    hand[tip_id][1:] = [pip_x + 5, pip_y + 45]
+    hand[dip_id][1:3] = [pip_x + 8, pip_y + 20]
+    hand[tip_id][1:3] = [pip_x + 5, pip_y + 45]
 
 
 def translated(hand, dx=0, dy=0):
-    return [[landmark_id, x + dx, y + dy] for landmark_id, x, y in hand]
+    return [
+        [landmark_id, x + dx, y + dy, z]
+        for landmark_id, x, y, z in hand
+    ]
 
 
 class GestureClassifierTests(unittest.TestCase):
@@ -78,9 +84,23 @@ class GestureClassifierTests(unittest.TestCase):
         hand = copy_hand()
         for pip, dip, tip in ((10, 11, 12), (14, 15, 16), (18, 19, 20)):
             fold_finger(hand, pip, dip, tip)
-        hand[4][1:] = [77, 42]
+        hand[4][1:3] = [77, 42]
         result = self.classifier().classify(hand, timestamp=0.0)
         self.assertEqual(result.gesture, Gesture.PINCH)
+
+    def test_point_toward_camera_uses_depth(self):
+        hand = copy_hand()
+        for pip, dip, tip in ((10, 11, 12), (14, 15, 16), (18, 19, 20)):
+            fold_finger(hand, pip, dip, tip)
+
+        # The index finger appears short in x/y but is straight along z.
+        hand[5][1:] = [75, 160, -0.02]
+        hand[6][1:] = [75, 135, -0.10]
+        hand[7][1:] = [75, 133, -0.20]
+        hand[8][1:] = [75, 131, -0.30]
+
+        result = self.classifier().classify(hand, timestamp=0.0)
+        self.assertEqual(result.gesture, Gesture.POINT)
 
     def test_swipe_left(self):
         classifier = self.classifier()
@@ -98,12 +118,12 @@ class GestureClassifierTests(unittest.TestCase):
         hand = copy_hand()
         for pip, dip, tip in ((10, 11, 12), (14, 15, 16), (18, 19, 20)):
             fold_finger(hand, pip, dip, tip)
-        hand[4][1:] = [77, 42]
+        hand[4][1:3] = [77, 42]
 
         classifier = self.classifier()
         classifier.classify(hand, timestamp=0.0)
         spread = copy_hand(hand)
-        spread[4][1:] = [60, 40]
+        spread[4][1:3] = [60, 40]
         zoom_in = classifier.classify(spread, timestamp=0.2)
         self.assertEqual(zoom_in.gesture, Gesture.ZOOM_IN)
 
@@ -115,6 +135,12 @@ class GestureClassifierTests(unittest.TestCase):
     def test_requires_all_landmarks(self):
         with self.assertRaises(ValueError):
             self.classifier().classify(OPEN_HAND[:20])
+
+    def test_requires_depth_value(self):
+        hand = copy_hand()
+        hand[8] = hand[8][:-1]
+        with self.assertRaisesRegex(ValueError, "id, x, y, and z"):
+            self.classifier().classify(hand, timestamp=0.0)
 
 
 if __name__ == "__main__":
