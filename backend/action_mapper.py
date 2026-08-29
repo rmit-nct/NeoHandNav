@@ -44,16 +44,20 @@ class ActionMapper:
         actions_enabled: bool = False,
         cooldown_ms: int = 800,
         scroll_amount: int = 4,
+        fist_release_ms: int = 250,
         executor: Executor | None = None,
     ) -> None:
         if cooldown_ms < 0:
             raise ValueError("cooldown_ms must be non-negative")
         if scroll_amount < 1:
             raise ValueError("scroll_amount must be at least 1")
+        if fist_release_ms < 0:
+            raise ValueError("fist_release_ms must be non-negative")
 
         zoom_modifier = "command" if platform.system() == "Darwin" else "ctrl"
         self.actions_enabled = actions_enabled
         self.cooldown_ms = cooldown_ms
+        self.fist_release_ms = fist_release_ms
         self.commands = {
             Gesture.SWIPE_LEFT: ActionCommand("key", ("left",), "previous page"),
             Gesture.SWIPE_RIGHT: ActionCommand("key", ("right",), "next page"),
@@ -68,8 +72,9 @@ class ActionMapper:
             Gesture.FIST: ActionCommand("key", ("space",), "play or pause"),
         }
         self._executor = executor or self._execute_with_pyautogui
-        self._last_action_at: dict[Gesture, float] = {}
+        self._last_action_at: dict[str, float] = {}
         self._held_static_gesture = Gesture.NONE
+        self._fist_release_started_at: float | None = None
 
     def set_actions_enabled(self, enabled: bool) -> None:
         """Arm or disarm OS control explicitly."""
@@ -87,8 +92,18 @@ class ActionMapper:
         now = monotonic() if timestamp is None else timestamp
 
         if gesture is Gesture.NONE:
-            self._held_static_gesture = Gesture.NONE
+            if self._held_static_gesture is Gesture.FIST:
+                if self._fist_release_started_at is None:
+                    self._fist_release_started_at = now
+                elif (
+                    now - self._fist_release_started_at
+                    >= self.fist_release_ms / 1000.0
+                ):
+                    self._held_static_gesture = Gesture.NONE
+                    self._fist_release_started_at = None
             return None
+
+        self._fist_release_started_at = None
 
         command = self.commands.get(gesture)
         if command is None:
@@ -105,11 +120,12 @@ class ActionMapper:
         else:
             self._held_static_gesture = Gesture.NONE
 
-        previous = self._last_action_at.get(gesture)
+        action_family = self._action_family(gesture)
+        previous = self._last_action_at.get(action_family)
         cooldown_seconds = self.cooldown_ms / 1000.0
         if previous is not None and now - previous < cooldown_seconds:
             return None
-        self._last_action_at[gesture] = now
+        self._last_action_at[action_family] = now
 
         if not self.actions_enabled:
             return ActionResult(command=command, executed=False)
@@ -119,6 +135,16 @@ class ActionMapper:
         except Exception as exc:  # keep the camera loop alive on OS errors
             return ActionResult(command=command, executed=False, error=str(exc))
         return ActionResult(command=command, executed=True)
+
+    @staticmethod
+    def _action_family(gesture: Gesture) -> str:
+        if gesture in (Gesture.SWIPE_LEFT, Gesture.SWIPE_RIGHT):
+            return "swipe"
+        if gesture in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+            return "scroll"
+        if gesture in (Gesture.ZOOM_IN, Gesture.ZOOM_OUT):
+            return "zoom"
+        return gesture.value
 
     @staticmethod
     def _execute_with_pyautogui(command: ActionCommand) -> None:

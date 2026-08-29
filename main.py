@@ -146,7 +146,11 @@ def main() -> int:
 
             now = time.monotonic()
             if hands:
-                result = classifier.classify(hands[0], timestamp=now)
+                result = classifier.classify(
+                    hands[0],
+                    timestamp=now,
+                    image_width=frame.shape[1],
+                )
             else:
                 classifier.reset()
                 result = GestureResult(Gesture.NONE, 0.0)
