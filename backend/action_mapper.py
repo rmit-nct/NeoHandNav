@@ -32,10 +32,13 @@ Executor = Callable[[ActionCommand], None]
 
 
 class ActionMapper:
-    """Apply cooldown and optional PyAutoGUI execution to gesture events.
+    """Gate gestures, apply cooldown, and optionally execute OS actions.
 
     Actions are disabled by default. In dry-run mode the same command result is
-    returned for the overlay, but no keyboard or scroll event is sent.
+    returned for the overlay, but no keyboard or scroll event is sent. When the
+    open-palm gate is enabled, a stable open palm must be shown before every new
+    action. A held scroll pose may repeat, but another action cannot replace it
+    until an open palm resets the control state.
     """
 
     def __init__(
@@ -44,6 +47,9 @@ class ActionMapper:
         actions_enabled: bool = False,
         cooldown_ms: int = 800,
         scroll_amount: int = 4,
+        scroll_cooldown_ms: int | None = None,
+        require_open_palm: bool = True,
+        open_palm_hold_ms: int = 120,
         fist_release_ms: int = 250,
         executor: Executor | None = None,
     ) -> None:
@@ -51,16 +57,27 @@ class ActionMapper:
             raise ValueError("cooldown_ms must be non-negative")
         if scroll_amount < 1:
             raise ValueError("scroll_amount must be at least 1")
+        if scroll_cooldown_ms is not None and scroll_cooldown_ms < 0:
+            raise ValueError("scroll_cooldown_ms must be non-negative")
+        if open_palm_hold_ms < 0:
+            raise ValueError("open_palm_hold_ms must be non-negative")
         if fist_release_ms < 0:
             raise ValueError("fist_release_ms must be non-negative")
 
         zoom_modifier = "command" if platform.system() == "Darwin" else "ctrl"
         self.actions_enabled = actions_enabled
         self.cooldown_ms = cooldown_ms
+        self.scroll_cooldown_ms = (
+            cooldown_ms if scroll_cooldown_ms is None else scroll_cooldown_ms
+        )
+        self.require_open_palm = require_open_palm
+        self.open_palm_hold_ms = open_palm_hold_ms
         self.fist_release_ms = fist_release_ms
         self.commands = {
-            Gesture.SWIPE_LEFT: ActionCommand("key", ("left",), "previous page"),
-            Gesture.SWIPE_RIGHT: ActionCommand("key", ("right",), "next page"),
+            Gesture.PREVIOUS_PAGE: ActionCommand(
+                "key", ("left",), "previous page"
+            ),
+            Gesture.NEXT_PAGE: ActionCommand("key", ("right",), "next page"),
             Gesture.SCROLL_UP: ActionCommand("scroll", (scroll_amount,), "scroll up"),
             Gesture.SCROLL_DOWN: ActionCommand("scroll", (-scroll_amount,), "scroll down"),
             Gesture.ZOOM_IN: ActionCommand(
@@ -75,6 +92,21 @@ class ActionMapper:
         self._last_action_at: dict[str, float] = {}
         self._held_static_gesture = Gesture.NONE
         self._fist_release_started_at: float | None = None
+        self._ready_for_action = not require_open_palm
+        self._active_control = Gesture.NONE
+        self._open_palm_started_at: float | None = None
+
+    @property
+    def control_status(self) -> str:
+        """Short state label suitable for the camera overlay."""
+
+        if not self.require_open_palm:
+            return "READY"
+        if self._active_control in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+            return f"ACTIVE: {self._active_control.display_name}"
+        if self._ready_for_action:
+            return "READY"
+        return "SHOW OPEN PALM"
 
     def set_actions_enabled(self, enabled: bool) -> None:
         """Arm or disarm OS control explicitly."""
@@ -86,10 +118,33 @@ class ActionMapper:
         result: GestureResult | Gesture,
         timestamp: float | None = None,
     ) -> ActionResult | None:
-        """Accept a gesture and return its action when cooldown permits."""
+        """Accept a gesture when the palm gate and cooldown both permit it."""
 
         gesture = result.gesture if isinstance(result, GestureResult) else result
         now = monotonic() if timestamp is None else timestamp
+
+        if gesture is Gesture.OPEN_PALM:
+            # One recognized palm frame immediately stops a held control. The
+            # palm must then remain recognized for a short time before the next
+            # action is armed, preventing a noisy transition from triggering it.
+            self._active_control = Gesture.NONE
+            self._held_static_gesture = Gesture.NONE
+            self._fist_release_started_at = None
+            if self._open_palm_started_at is None:
+                self._open_palm_started_at = now
+            if self.require_open_palm:
+                self._ready_for_action = False
+            if (
+                not self.require_open_palm
+                or now - self._open_palm_started_at
+                >= self.open_palm_hold_ms / 1000.0
+            ):
+                if not self._ready_for_action:
+                    self._last_action_at.clear()
+                self._ready_for_action = True
+            return None
+
+        self._open_palm_started_at = None
 
         if gesture is Gesture.NONE:
             if self._held_static_gesture is Gesture.FIST:
@@ -111,8 +166,25 @@ class ActionMapper:
                 self._held_static_gesture = Gesture.NONE
             return None
 
-        # A held fist must not press Space repeatedly. Motion gestures are
-        # already discrete events and may repeat after their short cooldown.
+        if self.require_open_palm:
+            if not self._ready_for_action:
+                return None
+            if self._active_control is not Gesture.NONE:
+                # A held scroll pose can repeat. Any different pose is ignored
+                # until the user deliberately shows an open palm.
+                if gesture is not self._active_control:
+                    self._active_control = Gesture.NONE
+                    self._ready_for_action = False
+                    return None
+                if gesture not in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+                    return None
+            else:
+                self._active_control = gesture
+                if gesture not in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+                    self._ready_for_action = False
+
+        # Keep a held fist one-shot in compatibility mode too. With the palm
+        # gate enabled, page, fist, and zoom controls are already one-shot.
         if gesture is Gesture.FIST:
             if self._held_static_gesture is Gesture.FIST:
                 return None
@@ -122,7 +194,11 @@ class ActionMapper:
 
         action_family = self._action_family(gesture)
         previous = self._last_action_at.get(action_family)
-        cooldown_seconds = self.cooldown_ms / 1000.0
+        if action_family == "scroll":
+            cooldown_ms = self.scroll_cooldown_ms
+        else:
+            cooldown_ms = self.cooldown_ms
+        cooldown_seconds = cooldown_ms / 1000.0
         if previous is not None and now - previous < cooldown_seconds:
             return None
         self._last_action_at[action_family] = now
@@ -138,8 +214,8 @@ class ActionMapper:
 
     @staticmethod
     def _action_family(gesture: Gesture) -> str:
-        if gesture in (Gesture.SWIPE_LEFT, Gesture.SWIPE_RIGHT):
-            return "swipe"
+        if gesture in (Gesture.PREVIOUS_PAGE, Gesture.NEXT_PAGE):
+            return "page"
         if gesture in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
             return "scroll"
         if gesture in (Gesture.ZOOM_IN, Gesture.ZOOM_OUT):

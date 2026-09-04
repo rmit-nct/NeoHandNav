@@ -34,10 +34,11 @@ def _draw_status(
     frame,
     result: GestureResult,
     actions_enabled: bool,
+    control_status: str,
     last_action: ActionResult | None,
 ) -> None:
     height, width = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (width, 94), (20, 20, 20), -1)
+    cv2.rectangle(frame, (0, 0), (width, 122), (20, 20, 20), -1)
 
     gesture_text = result.gesture.display_name
     if result.gesture is Gesture.NONE:
@@ -66,14 +67,25 @@ def _draw_status(
         cv2.LINE_AA,
     )
 
+    cv2.putText(
+        frame,
+        f"Control: {control_status}",
+        (16, 86),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (235, 235, 235),
+        1,
+        cv2.LINE_AA,
+    )
+
     if last_action is not None:
-        prefix = "DONE" if last_action.executed else "DRY RUN"
+        prefix = " DONE" if last_action.executed else "DRY RUN"
         if last_action.error:
             prefix = "ERROR"
         cv2.putText(
             frame,
             f"{prefix}: {last_action.command.description}",
-            (16, 86),
+            (16, 113),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             (235, 235, 235),
@@ -101,6 +113,12 @@ def main() -> int:
     )
     tracking_confidence = float(os.getenv("MIN_TRACKING_CONFIDENCE", "0.60"))
     cooldown_ms = int(os.getenv("GESTURE_COOLDOWN_MS", "800"))
+    scroll_cooldown_ms = int(os.getenv("SCROLL_COOLDOWN_MS", "220"))
+    open_palm_hold_ms = int(os.getenv("OPEN_PALM_HOLD_MS", "120"))
+    direction_settle_ms = int(os.getenv("DIRECTION_SETTLE_MS", "220"))
+    direction_stillness_radius = float(
+        os.getenv("DIRECTION_STILLNESS_RADIUS", "0.10")
+    )
     actions_enabled = _env_bool("ACTIONS_ENABLED", False)
 
     capture = _open_camera(camera_index)
@@ -122,10 +140,16 @@ def main() -> int:
         capture.release()
         return 1
 
-    classifier = GestureClassifier()
+    classifier = GestureClassifier(
+        direction_settle_seconds=direction_settle_ms / 1000.0,
+        direction_stillness_radius=direction_stillness_radius,
+    )
     mapper = ActionMapper(
         actions_enabled=actions_enabled,
         cooldown_ms=cooldown_ms,
+        scroll_cooldown_ms=scroll_cooldown_ms,
+        require_open_palm=True,
+        open_palm_hold_ms=open_palm_hold_ms,
     )
 
     last_action: ActionResult | None = None
@@ -166,7 +190,13 @@ def main() -> int:
             elif now - last_action_at > 1.2:
                 last_action = None
 
-            _draw_status(frame, result, actions_enabled, last_action)
+            _draw_status(
+                frame,
+                result,
+                actions_enabled,
+                mapper.control_status,
+                last_action,
+            )
             cv2.imshow(WINDOW_NAME, frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):

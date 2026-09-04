@@ -2,7 +2,7 @@
 
 The classifier consumes the landmark format produced by
 ``HandTracker.get_landmarks``: ``[landmark_id, x, y, z]`` for all 21 landmarks.
-It recognizes static hand shapes and turns deliberate hand motion into events.
+It recognizes static hand shapes plus the existing pinch-distance zoom events.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from math import acos, degrees, hypot, sqrt
 from time import monotonic
-from typing import Iterable, Sequence
+from typing import Sequence
 
 
 class Gesture(str, Enum):
@@ -23,8 +23,12 @@ class Gesture(str, Enum):
     POINT = "point"
     PINCH = "pinch"
     TWO_FINGER = "two_finger"
-    SWIPE_LEFT = "swipe_left"
-    SWIPE_RIGHT = "swipe_right"
+    PREVIOUS_PAGE = "previous_page"
+    NEXT_PAGE = "next_page"
+    # Backward-compatible aliases for code written before page controls became
+    # static orientation poses.
+    SWIPE_LEFT = "previous_page"
+    SWIPE_RIGHT = "next_page"
     SCROLL_UP = "scroll_up"
     SCROLL_DOWN = "scroll_down"
     ZOOM_IN = "zoom_in"
@@ -49,11 +53,11 @@ Landmark = Sequence[int | float]
 
 
 class GestureClassifier:
-    """Classify hand shapes and motion using MediaPipe landmark geometry.
+    """Classify hand shapes using MediaPipe landmark geometry.
 
-    Static labels require a few consecutive frames. Swipe, scroll, and zoom
-    are emitted as short motion events. Coordinates are normalized by palm
-    size so thresholds remain useful when the hand moves closer to the camera.
+    Labels require a few consecutive frames. Page and scroll controls depend
+    on the static direction of the index/middle pair; zoom continues to use
+    the normalized distance between the thumb and index fingertips.
     """
 
     _FINGERS = (
@@ -71,44 +75,75 @@ class GestureClassifier:
     _DEPTH_BACKTRACK_TOLERANCE = 0.10
     _MIN_PROJECTED_ANGLE_FOR_DEPTH = 75.0
     _PINCH_START_THRESHOLD = 0.35
-    _FOLDED_TIP_RATIO = 0.82
 
     def __init__(
         self,
         *,
         ema_alpha: float = 0.35,
         min_stable_frames: int = 3,
-        swipe_threshold: float = 0.55,
-        scroll_threshold: float = 0.55,
         zoom_threshold: float = 0.12,
-        motion_window_seconds: float = 0.8,
+        zoom_window_seconds: float = 0.8,
+        horizontal_direction_threshold: float = 0.55,
+        vertical_direction_threshold: float = 0.72,
+        diagonal_page_threshold: float = 0.30,
+        finger_alignment_threshold: float = 0.70,
+        direction_settle_seconds: float = 0.22,
+        direction_stillness_radius: float = 0.10,
     ) -> None:
         if not 0 < ema_alpha <= 1:
             raise ValueError("ema_alpha must be between 0 and 1")
         if min_stable_frames < 1:
             raise ValueError("min_stable_frames must be at least 1")
+        if zoom_window_seconds <= 0:
+            raise ValueError("zoom_window_seconds must be positive")
+        if not 0 < horizontal_direction_threshold <= 1:
+            raise ValueError(
+                "horizontal_direction_threshold must be between 0 and 1"
+            )
+        if not 0 < vertical_direction_threshold <= 1:
+            raise ValueError(
+                "vertical_direction_threshold must be between 0 and 1"
+            )
+        if not 0 < diagonal_page_threshold <= horizontal_direction_threshold:
+            raise ValueError(
+                "diagonal_page_threshold must be positive and no greater "
+                "than horizontal_direction_threshold"
+            )
+        if not -1 <= finger_alignment_threshold <= 1:
+            raise ValueError(
+                "finger_alignment_threshold must be between -1 and 1"
+            )
+        if direction_settle_seconds < 0:
+            raise ValueError("direction_settle_seconds must be non-negative")
+        if direction_stillness_radius <= 0:
+            raise ValueError("direction_stillness_radius must be positive")
 
         self.ema_alpha = ema_alpha
         self.min_stable_frames = min_stable_frames
-        self.swipe_threshold = swipe_threshold
-        self.scroll_threshold = scroll_threshold
         self.zoom_threshold = zoom_threshold
-        self.motion_window_seconds = motion_window_seconds
+        self.zoom_window_seconds = zoom_window_seconds
+        self.horizontal_direction_threshold = horizontal_direction_threshold
+        self.vertical_direction_threshold = vertical_direction_threshold
+        self.diagonal_page_threshold = diagonal_page_threshold
+        self.finger_alignment_threshold = finger_alignment_threshold
+        self.direction_settle_seconds = direction_settle_seconds
+        self.direction_stillness_radius = direction_stillness_radius
         self.reset()
 
     def reset(self) -> None:
         """Clear temporal state after the tracked hand disappears."""
 
-        self._filtered_motion_point: Point2D | None = None
         self._filtered_pinch_ratio: float | None = None
         self._filtered_depths: dict[int, float] = {}
-        self._motion_anchor: tuple[Point2D, float] | None = None
-        self._two_finger_frames = 0
         self._pinch_anchor: tuple[float, float] | None = None
         self._pinch_active = False
         self._pinch_start_frames = 0
         self._candidate = Gesture.NONE
         self._candidate_frames = 0
+        self._direction_candidate = Gesture.NONE
+        self._direction_anchor_point: Point2D | None = None
+        self._direction_anchor_scale = 1.0
+        self._direction_settle_started_at: float | None = None
 
     def classify(
         self,
@@ -116,7 +151,7 @@ class GestureClassifier:
         timestamp: float | None = None,
         image_width: float | None = None,
     ) -> GestureResult:
-        """Return the current stable shape or a deliberate motion event.
+        """Return the current stable shape or a pinch-distance zoom event.
 
         ``image_width`` should be supplied for webcam input. MediaPipe reports
         normalized z but this project stores x/y as pixels, so the width makes
@@ -168,28 +203,56 @@ class GestureClassifier:
             index_extended_in_image and not middle and not ring and not pinky
         )
         pinch_continue_pose = index and not middle and not ring and not pinky
-        two_finger_pose = self._two_finger_pose(points, extended_in_image)
+        two_finger_pose = self._two_finger_pose(extended_in_image)
         raw_gesture, confidence = self._static_shape(
             extended,
             pinch_ratio,
             pinch_start_pose,
             two_finger_pose,
         )
-        control_point_3d = self._average(points[index] for index in (8, 12))
-        control_point = (control_point_3d[0], control_point_3d[1])
-        motion = self._motion_event(
+        direction_is_settled = False
+        if raw_gesture is Gesture.TWO_FINGER:
+            directed_gesture, direction_confidence = self._two_finger_direction(
+                points
+            )
+            if directed_gesture is not None:
+                confidence = direction_confidence
+                control_point = (
+                    (points[8][0] + points[12][0]) / 2.0,
+                    (points[8][1] + points[12][1]) / 2.0,
+                )
+                direction_is_settled = self._direction_pose_is_settled(
+                    directed_gesture,
+                    control_point,
+                    palm_scale,
+                    now,
+                )
+                if direction_is_settled:
+                    raw_gesture = directed_gesture
+            else:
+                self._reset_direction_settle()
+        else:
+            self._reset_direction_settle()
+
+        zoom = self._zoom_event(
             raw_gesture=raw_gesture,
-            control_point=control_point,
-            palm_scale=palm_scale,
             pinch_ratio=pinch_ratio,
             pinch_start_pose=pinch_start_pose,
             pinch_continue_pose=pinch_continue_pose,
             timestamp=now,
         )
-        if motion is not None:
+        if zoom is not None:
             self._candidate = Gesture.NONE
             self._candidate_frames = 0
-            return GestureResult(motion, 1.0)
+            return GestureResult(zoom, 1.0)
+
+        # Directional poses already pass a time-based stillness check, so they
+        # do not need another frame-count delay. This behaves consistently at
+        # different webcam frame rates.
+        if direction_is_settled:
+            self._candidate = raw_gesture
+            self._candidate_frames = self.min_stable_frames
+            return GestureResult(raw_gesture, confidence)
 
         # Pinch is a persistent interaction mode, while zoom is a momentary
         # event inside that mode. Once armed, do not expose the underlying
@@ -242,65 +305,15 @@ class GestureClassifier:
             return Gesture.OPEN_PALM, extended_count / 4.0
         return Gesture.NONE, 0.0
 
-    def _motion_event(
+    def _zoom_event(
         self,
         *,
         raw_gesture: Gesture,
-        control_point: Point2D,
-        palm_scale: float,
         pinch_ratio: float,
         pinch_start_pose: bool,
         pinch_continue_pose: bool,
         timestamp: float,
     ) -> Gesture | None:
-        # Swipe and scroll use the midpoint of the index and middle fingertips.
-        # The ring and pinky must stay folded so an ordinary open hand remains
-        # a neutral pose instead of accidentally moving the page.
-        if raw_gesture is Gesture.TWO_FINGER:
-            self._two_finger_frames += 1
-            if self._two_finger_frames >= self.min_stable_frames:
-                control_point = self._ema_point(
-                    self._filtered_motion_point, control_point
-                )
-                self._filtered_motion_point = control_point
-                if self._motion_anchor is None:
-                    self._motion_anchor = (control_point, timestamp)
-                else:
-                    anchor, started_at = self._motion_anchor
-                    elapsed = timestamp - started_at
-                    if elapsed > self.motion_window_seconds:
-                        self._motion_anchor = (control_point, timestamp)
-                    else:
-                        dx = (control_point[0] - anchor[0]) / palm_scale
-                        dy = (control_point[1] - anchor[1]) / palm_scale
-                        if (
-                            abs(dx) >= self.swipe_threshold
-                            and abs(dx) > abs(dy) * 1.3
-                        ):
-                            self._motion_anchor = (control_point, timestamp)
-                            return (
-                                Gesture.SWIPE_RIGHT
-                                if dx > 0
-                                else Gesture.SWIPE_LEFT
-                            )
-                        if (
-                            abs(dy) >= self.scroll_threshold
-                            and abs(dy) > abs(dx) * 1.15
-                        ):
-                            self._motion_anchor = (control_point, timestamp)
-                            return (
-                                Gesture.SCROLL_DOWN
-                                if dy > 0
-                                else Gesture.SCROLL_UP
-                            )
-            else:
-                self._motion_anchor = None
-                self._filtered_motion_point = None
-        else:
-            self._two_finger_frames = 0
-            self._motion_anchor = None
-            self._filtered_motion_point = None
-
         # Pinch starts only when the thumb and index tips are close. Once armed,
         # opening that distance zooms in and closing it zooms out. Extending the
         # middle, ring, or pinky immediately cancels pinch mode.
@@ -323,7 +336,7 @@ class GestureClassifier:
             self._pinch_anchor = (pinch_ratio, timestamp)
         else:
             anchor_ratio, started_at = self._pinch_anchor
-            if timestamp - started_at > self.motion_window_seconds:
+            if timestamp - started_at > self.zoom_window_seconds:
                 self._pinch_anchor = (pinch_ratio, timestamp)
             else:
                 delta = pinch_ratio - anchor_ratio
@@ -331,15 +344,6 @@ class GestureClassifier:
                     self._pinch_anchor = (pinch_ratio, timestamp)
                     return Gesture.ZOOM_IN if delta > 0 else Gesture.ZOOM_OUT
         return None
-
-    def _ema_point(self, previous: Point2D | None, current: Point2D) -> Point2D:
-        if previous is None:
-            return current
-        alpha = self.ema_alpha
-        return (
-            alpha * current[0] + (1 - alpha) * previous[0],
-            alpha * current[1] + (1 - alpha) * previous[1],
-        )
 
     def _ema_value(self, previous: float | None, current: float) -> float:
         if previous is None:
@@ -412,25 +416,118 @@ class GestureClassifier:
         pip_distance = cls._distance_2d(points[0], points[pip])
         return joint_angle >= 145.0 and tip_distance > pip_distance * 1.08
 
-    @classmethod
+    @staticmethod
     def _two_finger_pose(
-        cls,
-        points: dict[int, Point3D],
         extended_in_image: Sequence[bool],
     ) -> bool:
-        index, middle, _, _ = extended_in_image
-        if not index or not middle:
-            return False
+        index, middle, ring, pinky = extended_in_image
+        return index and middle and not ring and not pinky
 
-        control_length = min(
-            cls._distance_2d(points[0], points[8]),
-            cls._distance_2d(points[0], points[12]),
+    def _two_finger_direction(
+        self,
+        points: dict[int, Point3D],
+    ) -> tuple[Gesture | None, float]:
+        """Map the static direction of the index/middle pair to a control.
+
+        Each direction uses the finger's MCP-to-tip vector, so moving the whole
+        hand around the frame does not change the command. Both fingers must be
+        sufficiently parallel before a direction is accepted.
+        """
+
+        directions: list[Point2D] = []
+        for mcp_id, tip_id in ((5, 8), (9, 12)):
+            dx = points[tip_id][0] - points[mcp_id][0]
+            dy = points[tip_id][1] - points[mcp_id][1]
+            length = hypot(dx, dy)
+            if length == 0:
+                return None, 0.0
+            directions.append((dx / length, dy / length))
+
+        alignment = (
+            directions[0][0] * directions[1][0]
+            + directions[0][1] * directions[1][1]
         )
-        folded_limit = control_length * cls._FOLDED_TIP_RATIO
+        if alignment < self.finger_alignment_threshold:
+            return None, 0.0
+
+        average_x = directions[0][0] + directions[1][0]
+        average_y = directions[0][1] + directions[1][1]
+        average_length = hypot(average_x, average_y)
+        if average_length == 0:
+            return None, 0.0
+        direction_x = average_x / average_length
+        direction_y = average_y / average_length
+
+        # Check ordinary horizontal poses first. A right hand often cannot
+        # rotate far enough for a perfectly horizontal Next Page pose, so an
+        # upper diagonal is also treated as a page direction. Scroll Up keeps
+        # a narrow vertical lane, preventing that ergonomic pose from becoming
+        # an accidental upward scroll. The same rule supports left hands too.
+        if (
+            direction_x >= self.horizontal_direction_threshold
+            and abs(direction_y) <= self.vertical_direction_threshold
+        ):
+            return Gesture.NEXT_PAGE, direction_x
+        if (
+            direction_x <= -self.horizontal_direction_threshold
+            and abs(direction_y) <= self.vertical_direction_threshold
+        ):
+            return Gesture.PREVIOUS_PAGE, -direction_x
+        if direction_y <= -self.vertical_direction_threshold:
+            if direction_x >= self.diagonal_page_threshold:
+                return Gesture.NEXT_PAGE, direction_x
+            if direction_x <= -self.diagonal_page_threshold:
+                return Gesture.PREVIOUS_PAGE, -direction_x
+        if direction_y <= -self.vertical_direction_threshold:
+            return Gesture.SCROLL_UP, -direction_y
+        if direction_y >= self.vertical_direction_threshold:
+            return Gesture.SCROLL_DOWN, direction_y
+        return None, 0.0
+
+    def _direction_pose_is_settled(
+        self,
+        gesture: Gesture,
+        control_point: Point2D,
+        palm_scale: float,
+        timestamp: float,
+    ) -> bool:
+        """Require a directional pose to stop moving before it is accepted."""
+
+        if (
+            gesture is not self._direction_candidate
+            or self._direction_anchor_point is None
+            or self._direction_settle_started_at is None
+        ):
+            self._direction_candidate = gesture
+            self._direction_anchor_point = control_point
+            self._direction_anchor_scale = palm_scale
+            self._direction_settle_started_at = timestamp
+            return self.direction_settle_seconds == 0
+
+        scale = max(palm_scale, self._direction_anchor_scale, 1.0)
+        displacement = (
+            hypot(
+                control_point[0] - self._direction_anchor_point[0],
+                control_point[1] - self._direction_anchor_point[1],
+            )
+            / scale
+        )
+        if displacement > self.direction_stillness_radius:
+            self._direction_anchor_point = control_point
+            self._direction_anchor_scale = palm_scale
+            self._direction_settle_started_at = timestamp
+            return self.direction_settle_seconds == 0
+
         return (
-            cls._distance_2d(points[0], points[16]) < folded_limit
-            and cls._distance_2d(points[0], points[20]) < folded_limit
+            timestamp - self._direction_settle_started_at
+            >= self.direction_settle_seconds
         )
+
+    def _reset_direction_settle(self) -> None:
+        self._direction_candidate = Gesture.NONE
+        self._direction_anchor_point = None
+        self._direction_anchor_scale = 1.0
+        self._direction_settle_started_at = None
 
     def _smooth_depths(
         self, points: dict[int, Point3D]
@@ -472,15 +569,6 @@ class GestureClassifier:
         dy = first[1] - second[1]
         dz = (first[2] - second[2]) * depth_scale
         return sqrt(dx * dx + dy * dy + dz * dz)
-
-    @staticmethod
-    def _average(points: Iterable[Point3D]) -> Point3D:
-        values = list(points)
-        return (
-            sum(point[0] for point in values) / len(values),
-            sum(point[1] for point in values) / len(values),
-            sum(point[2] for point in values) / len(values),
-        )
 
     @classmethod
     def _angle_2d(cls, first: Point3D, vertex: Point3D, third: Point3D) -> float:
