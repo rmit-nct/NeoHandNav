@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from math import acos, degrees, hypot, sqrt
+from math import acos, degrees, hypot, isfinite, sqrt
 from time import monotonic
 from typing import Sequence
 
@@ -89,11 +89,27 @@ class GestureClassifier:
         finger_alignment_threshold: float = 0.70,
         direction_settle_seconds: float = 0.22,
         direction_stillness_radius: float = 0.10,
+        max_frame_gap_seconds: float = 0.5,
+        fist_settle_seconds: float = 0.15,
     ) -> None:
         if not 0 < ema_alpha <= 1:
             raise ValueError("ema_alpha must be between 0 and 1")
         if min_stable_frames < 1:
             raise ValueError("min_stable_frames must be at least 1")
+        if not isinstance(min_stable_frames, int):
+            raise ValueError("min_stable_frames must be an integer")
+        for name, value in (
+            ("zoom_window_seconds", zoom_window_seconds),
+            ("direction_settle_seconds", direction_settle_seconds),
+            ("direction_stillness_radius", direction_stillness_radius),
+            ("fist_settle_seconds", fist_settle_seconds),
+        ):
+            if not isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if not isfinite(zoom_threshold) or zoom_threshold <= 0:
+            raise ValueError("zoom_threshold must be positive and finite")
+        if not isfinite(max_frame_gap_seconds) or max_frame_gap_seconds <= 0:
+            raise ValueError("max_frame_gap_seconds must be positive and finite")
         if zoom_window_seconds <= 0:
             raise ValueError("zoom_window_seconds must be positive")
         if not 0 < horizontal_direction_threshold <= 1:
@@ -128,6 +144,8 @@ class GestureClassifier:
         self.finger_alignment_threshold = finger_alignment_threshold
         self.direction_settle_seconds = direction_settle_seconds
         self.direction_stillness_radius = direction_stillness_radius
+        self.max_frame_gap_seconds = max_frame_gap_seconds
+        self.fist_settle_seconds = fist_settle_seconds
         self.reset()
 
     def reset(self) -> None:
@@ -140,10 +158,13 @@ class GestureClassifier:
         self._pinch_start_frames = 0
         self._candidate = Gesture.NONE
         self._candidate_frames = 0
+        self._candidate_started_at: float | None = None
         self._direction_candidate = Gesture.NONE
         self._direction_anchor_point: Point2D | None = None
         self._direction_anchor_scale = 1.0
         self._direction_settle_started_at: float | None = None
+        self._direction_settled = False
+        self._last_timestamp: float | None = None
 
     def classify(
         self,
@@ -159,11 +180,40 @@ class GestureClassifier:
         for callers that only have the landmark list.
         """
 
-        if image_width is not None and image_width <= 0:
+        if image_width is not None and (not isfinite(image_width) or image_width <= 0):
+            self.reset()
             raise ValueError("image_width must be positive")
 
         now = monotonic() if timestamp is None else timestamp
-        points = self._to_points(landmarks)
+        if not isfinite(now):
+            self.reset()
+            raise ValueError("timestamp must be finite")
+        if self._last_timestamp is not None and (
+            now <= self._last_timestamp
+            or now - self._last_timestamp > self.max_frame_gap_seconds
+        ):
+            self.reset()
+        self._last_timestamp = now
+        try:
+            points = self._to_points(landmarks)
+        except (ValueError, TypeError, OverflowError):
+            self.reset()
+            raise ValueError(
+                "Expected 21 unique finite landmarks with id, x, y, and z"
+            ) from None
+        # A collapsed palm or missing-length finger bone is tracking failure,
+        # not evidence that every finger is folded into a fist.
+        if (
+            self._distance_2d(points[0], points[9]) < 1e-6
+            or self._distance_2d(points[5], points[17]) < 1e-6
+            or any(
+                self._distance_3d(points[a], points[b], image_width or 1) < 1e-6
+                for tip, dip, pip, mcp in self._FINGERS
+                for a, b in ((mcp, pip), (pip, dip), (dip, tip))
+            )
+        ):
+            self.reset()
+            raise ValueError("Collapsed palm or finger landmarks")
         points = self._smooth_depths(points)
         palm_scale = max(
             self._distance_2d(points[0], points[9]),
@@ -203,13 +253,24 @@ class GestureClassifier:
             index_extended_in_image and not middle and not ring and not pinky
         )
         pinch_continue_pose = index and not middle and not ring and not pinky
-        two_finger_pose = self._two_finger_pose(extended_in_image)
+        two_finger_pose = self._two_finger_pose(extended_in_image, extended)
+        # Directional controls need positive evidence of folded ring/pinky,
+        # rather than treating any uncertain projection as a closed finger.
+        two_finger_pose = two_finger_pose and all(
+            self._angle_2d(points[mcp], points[pip], points[tip]) < 120
+            for tip, _, pip, mcp in self._FINGERS[2:]
+        )
         raw_gesture, confidence = self._static_shape(
             extended,
             pinch_ratio,
             pinch_start_pose,
             two_finger_pose,
         )
+        if raw_gesture is Gesture.FIST and not all(
+            self._angle_2d(points[mcp], points[pip], points[tip]) < 120
+            for tip, _, pip, mcp in self._FINGERS
+        ):
+            raw_gesture, confidence = Gesture.NONE, 0.0
         direction_is_settled = False
         if raw_gesture is Gesture.TWO_FINGER:
             directed_gesture, direction_confidence = self._two_finger_direction(
@@ -272,10 +333,16 @@ class GestureClassifier:
         else:
             self._candidate = raw_gesture
             self._candidate_frames = 1
+            self._candidate_started_at = now
 
         if raw_gesture is Gesture.NONE:
             return GestureResult(Gesture.NONE, 0.0)
         if self._candidate_frames < self.min_stable_frames:
+            return GestureResult(Gesture.NONE, confidence)
+        if (
+            raw_gesture is Gesture.FIST and self._candidate_started_at is not None
+            and now - self._candidate_started_at < self.fist_settle_seconds
+        ):
             return GestureResult(Gesture.NONE, confidence)
         return GestureResult(raw_gesture, confidence)
 
@@ -371,10 +438,14 @@ class GestureClassifier:
         joint_angle_3d = cls._angle_3d(
             points[mcp], points[pip], points[tip], depth_scale
         )
+        distal_angle_3d = cls._angle_3d(
+            points[pip], points[dip], points[tip], depth_scale
+        )
         tip_distance_3d = cls._distance_3d(points[0], points[tip], depth_scale)
         pip_distance_3d = cls._distance_3d(points[0], points[pip], depth_scale)
         extended_in_3d = (
             joint_angle_3d >= 135.0
+            and distal_angle_3d >= 135.0
             and joint_angle_2d >= cls._MIN_PROJECTED_ANGLE_FOR_DEPTH
             and tip_distance_3d > pip_distance_3d * 1.05
         )
@@ -398,6 +469,7 @@ class GestureClassifier:
             and tip_forward_depth >= cls._FORWARD_TIP_THRESHOLD
             and depth_is_consistent
             and joint_angle_3d >= 115.0
+            and distal_angle_3d >= 135.0
             and joint_angle_2d >= cls._MIN_PROJECTED_ANGLE_FOR_DEPTH
             and tip_distance_3d > pip_distance_3d * 1.02
         )
@@ -414,14 +486,19 @@ class GestureClassifier:
         joint_angle = cls._angle_2d(points[mcp], points[pip], points[tip])
         tip_distance = cls._distance_2d(points[0], points[tip])
         pip_distance = cls._distance_2d(points[0], points[pip])
-        return joint_angle >= 145.0 and tip_distance > pip_distance * 1.08
+        distal_angle = cls._angle_2d(points[pip], points[tip - 1], points[tip])
+        return (
+            joint_angle >= 145.0 and distal_angle >= 135.0
+            and tip_distance > pip_distance * 1.08
+        )
 
     @staticmethod
     def _two_finger_pose(
         extended_in_image: Sequence[bool],
+        extended: Sequence[bool],
     ) -> bool:
         index, middle, ring, pinky = extended_in_image
-        return index and middle and not ring and not pinky
+        return index and middle and not ring and not pinky and not any(extended[2:])
 
     def _two_finger_direction(
         self,
@@ -435,11 +512,15 @@ class GestureClassifier:
         """
 
         directions: list[Point2D] = []
+        palm_scale = max(
+            self._distance_2d(points[0], points[9]),
+            self._distance_2d(points[5], points[17]),
+        )
         for mcp_id, tip_id in ((5, 8), (9, 12)):
             dx = points[tip_id][0] - points[mcp_id][0]
             dy = points[tip_id][1] - points[mcp_id][1]
             length = hypot(dx, dy)
-            if length == 0:
+            if length < palm_scale * 0.5:
                 return None, 0.0
             directions.append((dx / length, dy / length))
 
@@ -502,7 +583,13 @@ class GestureClassifier:
             self._direction_anchor_point = control_point
             self._direction_anchor_scale = palm_scale
             self._direction_settle_started_at = timestamp
+            self._direction_settled = self.direction_settle_seconds == 0
             return self.direction_settle_seconds == 0
+
+        # Stillness is an entry check. Once accepted, translating the same
+        # pose must not periodically stop/restart a held scroll.
+        if self._direction_settled:
+            return True
 
         scale = max(palm_scale, self._direction_anchor_scale, 1.0)
         displacement = (
@@ -518,16 +605,18 @@ class GestureClassifier:
             self._direction_settle_started_at = timestamp
             return self.direction_settle_seconds == 0
 
-        return (
+        self._direction_settled = (
             timestamp - self._direction_settle_started_at
             >= self.direction_settle_seconds
         )
+        return self._direction_settled
 
     def _reset_direction_settle(self) -> None:
         self._direction_candidate = Gesture.NONE
         self._direction_anchor_point = None
         self._direction_anchor_scale = 1.0
         self._direction_settle_started_at = None
+        self._direction_settled = False
 
     def _smooth_depths(
         self, points: dict[int, Point3D]
@@ -547,11 +636,19 @@ class GestureClassifier:
             if len(landmark) < 4:
                 raise ValueError("Each landmark must contain id, x, y, and z")
             landmark_id = int(landmark[0])
+            if (
+                landmark_id != landmark[0]
+                or landmark_id not in range(21)
+                or landmark_id in points
+            ):
+                raise ValueError("Landmark ids must be unique integers from 0 to 20")
             points[landmark_id] = (
                 float(landmark[1]),
                 float(landmark[2]),
                 float(landmark[3]),
             )
+            if not all(isfinite(value) for value in points[landmark_id]):
+                raise ValueError("Landmark coordinates must be finite")
         missing = set(range(21)) - points.keys()
         if missing:
             raise ValueError(f"Expected 21 landmarks; missing ids: {sorted(missing)}")

@@ -114,6 +114,7 @@ class GestureClassifierTests(unittest.TestCase):
             "min_stable_frames": 1,
             "zoom_threshold": 0.10,
             "direction_settle_seconds": 0.0,
+            "fist_settle_seconds": 0.0,
         }
         settings.update(overrides)
         return GestureClassifier(**settings)

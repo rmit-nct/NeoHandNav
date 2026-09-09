@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 from dataclasses import dataclass
+from math import isfinite
 from time import monotonic
 from typing import Callable
 
@@ -37,8 +38,8 @@ class ActionMapper:
     Actions are disabled by default. In dry-run mode the same command result is
     returned for the overlay, but no keyboard or scroll event is sent. When the
     open-palm gate is enabled, a stable open palm must be shown before every new
-    action. A held scroll pose may repeat, but another action cannot replace it
-    until an open palm resets the control state.
+    interaction. A held scroll pose repeats; a pinch session accepts zoom in
+    and out events. Switching to another control requires a new open palm.
     """
 
     def __init__(
@@ -51,6 +52,8 @@ class ActionMapper:
         require_open_palm: bool = True,
         open_palm_hold_ms: int = 120,
         fist_release_ms: int = 250,
+        unknown_grace_ms: int = 350,
+        max_frame_gap_seconds: float = 0.5,
         executor: Executor | None = None,
     ) -> None:
         if cooldown_ms < 0:
@@ -63,6 +66,10 @@ class ActionMapper:
             raise ValueError("open_palm_hold_ms must be non-negative")
         if fist_release_ms < 0:
             raise ValueError("fist_release_ms must be non-negative")
+        if unknown_grace_ms < 0:
+            raise ValueError("unknown_grace_ms must be non-negative")
+        if not isfinite(max_frame_gap_seconds) or max_frame_gap_seconds <= 0:
+            raise ValueError("max_frame_gap_seconds must be positive and finite")
 
         zoom_modifier = "command" if platform.system() == "Darwin" else "ctrl"
         self.actions_enabled = actions_enabled
@@ -73,6 +80,8 @@ class ActionMapper:
         self.require_open_palm = require_open_palm
         self.open_palm_hold_ms = open_palm_hold_ms
         self.fist_release_ms = fist_release_ms
+        self.unknown_grace_ms = unknown_grace_ms
+        self.max_frame_gap_seconds = max_frame_gap_seconds
         self.commands = {
             Gesture.PREVIOUS_PAGE: ActionCommand(
                 "key", ("left",), "previous page"
@@ -89,12 +98,18 @@ class ActionMapper:
             Gesture.FIST: ActionCommand("key", ("space",), "play or pause"),
         }
         self._executor = executor or self._execute_with_pyautogui
+        self.reset()
+
+    def reset(self) -> None:
+        """Discard all authorization and timing state after tracking is lost."""
         self._last_action_at: dict[str, float] = {}
         self._held_static_gesture = Gesture.NONE
         self._fist_release_started_at: float | None = None
-        self._ready_for_action = not require_open_palm
+        self._ready_for_action = not self.require_open_palm
         self._active_control = Gesture.NONE
         self._open_palm_started_at: float | None = None
+        self._unknown_started_at: float | None = None
+        self._last_timestamp: float | None = None
 
     @property
     def control_status(self) -> str:
@@ -103,7 +118,11 @@ class ActionMapper:
         if not self.require_open_palm:
             return "READY"
         if self._active_control in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+            if self._unknown_started_at is not None:
+                return "PAUSED: hold scroll pose"
             return f"ACTIVE: {self._active_control.display_name}"
+        if self._active_control is Gesture.PINCH:
+            return "ACTIVE: Pinch zoom"
         if self._ready_for_action:
             return "READY"
         return "SHOW OPEN PALM"
@@ -111,6 +130,8 @@ class ActionMapper:
     def set_actions_enabled(self, enabled: bool) -> None:
         """Arm or disarm OS control explicitly."""
 
+        if enabled != self.actions_enabled:
+            self.reset()
         self.actions_enabled = enabled
 
     def handle(
@@ -122,6 +143,15 @@ class ActionMapper:
 
         gesture = result.gesture if isinstance(result, GestureResult) else result
         now = monotonic() if timestamp is None else timestamp
+        if not isfinite(now):
+            self.reset()
+            raise ValueError("timestamp must be finite")
+        if self._last_timestamp is not None and (
+            now <= self._last_timestamp
+            or now - self._last_timestamp > self.max_frame_gap_seconds
+        ):
+            self.reset()
+        self._last_timestamp = now
 
         if gesture is Gesture.OPEN_PALM:
             # One recognized palm frame immediately stops a held control. The
@@ -130,6 +160,7 @@ class ActionMapper:
             self._active_control = Gesture.NONE
             self._held_static_gesture = Gesture.NONE
             self._fist_release_started_at = None
+            self._unknown_started_at = None
             if self._open_palm_started_at is None:
                 self._open_palm_started_at = now
             if self.require_open_palm:
@@ -146,7 +177,11 @@ class ActionMapper:
 
         self._open_palm_started_at = None
 
-        if gesture is Gesture.NONE:
+        if gesture in (Gesture.NONE, Gesture.TWO_FINGER):
+            if self._unknown_started_at is None:
+                self._unknown_started_at = now
+            if now - self._unknown_started_at >= self.unknown_grace_ms / 1000.0:
+                self._end_control()
             if self._held_static_gesture is Gesture.FIST:
                 if self._fist_release_started_at is None:
                     self._fist_release_started_at = now
@@ -158,10 +193,21 @@ class ActionMapper:
                     self._fist_release_started_at = None
             return None
 
+        if (
+            self._unknown_started_at is not None
+            and now - self._unknown_started_at >= self.unknown_grace_ms / 1000.0
+        ):
+            self._end_control()
+        self._unknown_started_at = None
         self._fist_release_started_at = None
 
         command = self.commands.get(gesture)
         if command is None:
+            if self._active_control is not Gesture.NONE:
+                if not (
+                    self._active_control is Gesture.PINCH and gesture is Gesture.PINCH
+                ):
+                    self._end_control()
             if gesture is not Gesture.FIST:
                 self._held_static_gesture = Gesture.NONE
             return None
@@ -170,27 +216,25 @@ class ActionMapper:
             if not self._ready_for_action:
                 return None
             if self._active_control is not Gesture.NONE:
-                # A held scroll pose can repeat. Any different pose is ignored
-                # until the user deliberately shows an open palm.
-                if gesture is not self._active_control:
-                    self._active_control = Gesture.NONE
-                    self._ready_for_action = False
+                # Scroll keeps one direction; a pinch session may zoom either
+                # way. Other controls require a deliberate open-palm reset.
+                continuing_zoom = self._active_control is Gesture.PINCH and gesture in (
+                    Gesture.ZOOM_IN, Gesture.ZOOM_OUT
+                )
+                if gesture is not self._active_control and not continuing_zoom:
+                    self._end_control()
                     return None
-                if gesture not in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
+                if (
+                    gesture not in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN)
+                    and not continuing_zoom
+                ):
                     return None
-            else:
-                self._active_control = gesture
-                if gesture not in (Gesture.SCROLL_UP, Gesture.SCROLL_DOWN):
-                    self._ready_for_action = False
 
         # Keep a held fist one-shot in compatibility mode too. With the palm
-        # gate enabled, page, fist, and zoom controls are already one-shot.
+        # gate enabled, page and fist controls are already one-shot.
         if gesture is Gesture.FIST:
             if self._held_static_gesture is Gesture.FIST:
                 return None
-            self._held_static_gesture = Gesture.FIST
-        else:
-            self._held_static_gesture = Gesture.NONE
 
         action_family = self._action_family(gesture)
         previous = self._last_action_at.get(action_family)
@@ -202,6 +246,12 @@ class ActionMapper:
         if previous is not None and now - previous < cooldown_seconds:
             return None
         self._last_action_at[action_family] = now
+        # Commit interaction state only after cooldown accepts the command.
+        self._held_static_gesture = gesture if gesture is Gesture.FIST else Gesture.NONE
+        if self.require_open_palm:
+            self._active_control = Gesture.PINCH if action_family == "zoom" else gesture
+            if action_family not in ("scroll", "zoom"):
+                self._ready_for_action = False
 
         if not self.actions_enabled:
             return ActionResult(command=command, executed=False)
@@ -209,8 +259,16 @@ class ActionMapper:
         try:
             self._executor(command)
         except Exception as exc:  # keep the camera loop alive on OS errors
+            # In particular, never auto-resume after PyAutoGUI's fail-safe.
+            self.set_actions_enabled(False)
             return ActionResult(command=command, executed=False, error=str(exc))
         return ActionResult(command=command, executed=True)
+
+    def _end_control(self) -> None:
+        """End a consumed interaction; preserve readiness while forming a pose."""
+        if self._active_control is not Gesture.NONE:
+            self._active_control = Gesture.NONE
+            self._ready_for_action = not self.require_open_palm
 
     @staticmethod
     def _action_family(gesture: Gesture) -> str:
@@ -227,11 +285,13 @@ class ActionMapper:
         import pyautogui
 
         pyautogui.FAILSAFE = True
+        # Cooldowns above pace commands. The default 100 ms post-call sleep
+        # would freeze camera capture on every action; bypass only that sleep.
         if command.kind == "key":
-            pyautogui.press(str(command.arguments[0]))
+            pyautogui.press(str(command.arguments[0]), _pause=False)
         elif command.kind == "scroll":
-            pyautogui.scroll(int(command.arguments[0]))
+            pyautogui.scroll(int(command.arguments[0]), _pause=False)
         elif command.kind == "hotkey":
-            pyautogui.hotkey(*(str(value) for value in command.arguments))
+            pyautogui.hotkey(*(str(value) for value in command.arguments), _pause=False)
         else:
             raise ValueError(f"Unsupported action kind: {command.kind}")

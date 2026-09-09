@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
+from pathlib import Path
 import sys
 import time
 
@@ -11,6 +14,7 @@ from dotenv import load_dotenv
 
 from backend.action_mapper import ActionMapper, ActionResult
 from backend.gesture_classifier import Gesture, GestureClassifier, GestureResult
+from backend.gesture_controller import GestureController
 from backend.hand_tracker import HandTracker
 
 
@@ -45,7 +49,7 @@ def _draw_status(
         gesture_text = "No stable gesture"
     cv2.putText(
         frame,
-        f"Gesture: {gesture_text}  Confidence: {result.confidence:.0%}",
+        f"Gesture: {gesture_text}  Score: {result.confidence:.0%}",
         (16, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,
@@ -84,7 +88,7 @@ def _draw_status(
             prefix = "ERROR"
         cv2.putText(
             frame,
-            f"{prefix}: {last_action.command.description}",
+            f"{prefix}: {last_action.command.description} {last_action.command.arguments}",
             (16, 113),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -106,6 +110,12 @@ def _draw_status(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Webcam gesture controls")
+    parser.add_argument(
+        "--trace", type=Path,
+        help="Write landmarks and actions to a new local JSONL file",
+    )
+    args = parser.parse_args()
     load_dotenv()
     camera_index = int(os.getenv("CAMERA_INDEX", "0"))
     detection_confidence = float(
@@ -113,13 +123,30 @@ def main() -> int:
     )
     tracking_confidence = float(os.getenv("MIN_TRACKING_CONFIDENCE", "0.60"))
     cooldown_ms = int(os.getenv("GESTURE_COOLDOWN_MS", "800"))
-    scroll_cooldown_ms = int(os.getenv("SCROLL_COOLDOWN_MS", "220"))
+    scroll_cooldown_ms = int(os.getenv("SCROLL_COOLDOWN_MS", "60"))
+    scroll_amount = int(os.getenv("SCROLL_AMOUNT", "1"))
     open_palm_hold_ms = int(os.getenv("OPEN_PALM_HOLD_MS", "120"))
     direction_settle_ms = int(os.getenv("DIRECTION_SETTLE_MS", "220"))
     direction_stillness_radius = float(
         os.getenv("DIRECTION_STILLNESS_RADIUS", "0.10")
     )
     actions_enabled = _env_bool("ACTIONS_ENABLED", False)
+
+    classifier_settings = {
+        "direction_settle_seconds": direction_settle_ms / 1000.0,
+        "direction_stillness_radius": direction_stillness_radius,
+    }
+    mapper_settings = {
+        "cooldown_ms": cooldown_ms,
+        "scroll_cooldown_ms": scroll_cooldown_ms,
+        "scroll_amount": scroll_amount,
+        "require_open_palm": True,
+        "open_palm_hold_ms": open_palm_hold_ms,
+    }
+    # Validate configuration before acquiring the camera or model resources.
+    classifier = GestureClassifier(**classifier_settings)
+    mapper = ActionMapper(actions_enabled=actions_enabled, **mapper_settings)
+    controller = GestureController(classifier, mapper)
 
     capture = _open_camera(camera_index)
     if not capture.isOpened():
@@ -131,7 +158,7 @@ def main() -> int:
         return 1
 
     tracker = HandTracker(
-        max_hands=1,
+        max_hands=2,
         detection_con=detection_confidence,
         track_con=tracking_confidence,
     )
@@ -140,24 +167,21 @@ def main() -> int:
         capture.release()
         return 1
 
-    classifier = GestureClassifier(
-        direction_settle_seconds=direction_settle_ms / 1000.0,
-        direction_stillness_radius=direction_stillness_radius,
-    )
-    mapper = ActionMapper(
-        actions_enabled=actions_enabled,
-        cooldown_ms=cooldown_ms,
-        scroll_cooldown_ms=scroll_cooldown_ms,
-        require_open_palm=True,
-        open_palm_hold_ms=open_palm_hold_ms,
-    )
-
     last_action: ActionResult | None = None
     last_action_at = 0.0
     print(f"NEO HandNav started. Actions are {'ARMED' if actions_enabled else 'DRY RUN'}.")
     print("Press Q in the camera window to quit.")
 
+    trace = None
     try:
+        if args.trace is not None:
+            args.trace.parent.mkdir(parents=True, exist_ok=True)
+            trace = args.trace.open("x", encoding="utf-8")
+            trace.write(json.dumps({
+                "type": "session", "version": 1,
+                "classifier": classifier_settings,
+                "mapper": mapper_settings,
+            }) + "\n")
         while True:
             success, frame = capture.read()
             if not success:
@@ -169,17 +193,18 @@ def main() -> int:
             hands = tracker.get_landmarks(frame, draw=True)
 
             now = time.monotonic()
-            if hands:
-                result = classifier.classify(
-                    hands[0],
-                    timestamp=now,
-                    image_width=frame.shape[1],
-                )
-            else:
-                classifier.reset()
-                result = GestureResult(Gesture.NONE, 0.0)
-
-            action = mapper.handle(result, timestamp=now)
+            result, action = controller.process(hands, now, frame.shape[1])
+            if trace is not None:
+                trace.write(json.dumps({
+                    "type": "frame", "timestamp": now, "image_width": frame.shape[1],
+                    "hands": hands, "gesture": result.gesture.value,
+                    "control_status": mapper.control_status,
+                    "tracking_status": controller.tracking_status,
+                    "action": action.command.description if action else None,
+                    "arguments": action.command.arguments if action else None,
+                    "executed": action.executed if action else False,
+                    "error": action.error if action else None,
+                }) + "\n")
             if action is not None:
                 last_action = action
                 last_action_at = now
@@ -193,8 +218,9 @@ def main() -> int:
             _draw_status(
                 frame,
                 result,
-                actions_enabled,
-                mapper.control_status,
+                mapper.actions_enabled,
+                (mapper.control_status if controller.tracking_status == "TRACKING"
+                 else controller.tracking_status),
                 last_action,
             )
             cv2.imshow(WINDOW_NAME, frame)
@@ -204,6 +230,8 @@ def main() -> int:
             if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
                 break
     finally:
+        if trace is not None:
+            trace.close()
         capture.release()
         cv2.destroyAllWindows()
         tracker.detector.close()

@@ -1,6 +1,8 @@
 import cv2
 import os
 import urllib.request
+from pathlib import Path
+from time import monotonic_ns
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
@@ -8,8 +10,10 @@ from mediapipe.tasks.python import vision
 class HandTracker:
     def __init__(self, max_hands=2, detection_con=0.7, track_con=0.5):
         self.max_hands = max_hands
-        model_path = 'hand_landmarker.task'
+        model_path = str(Path(__file__).resolve().parent / 'hand_landmarker.task')
         self.detector = None  # Khởi tạo là None
+        self.detection_result = None
+        self._last_timestamp_ms = -1
         
         # Tải mô hình nếu chưa có
         if not os.path.exists(model_path):
@@ -26,9 +30,11 @@ class HandTracker:
         base_options = python.BaseOptions(model_asset_path=model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO,
             num_hands=max_hands,
             min_hand_detection_confidence=detection_con,
-            min_hand_presence_confidence=track_con
+            min_hand_presence_confidence=track_con,
+            min_tracking_confidence=track_con,
         )
         
         # Tạo đối tượng HandLandmarker
@@ -41,6 +47,7 @@ class HandTracker:
 
     def process_frame(self, frame):
         """Xử lý một frame và lưu kết quả vào self.detection_result"""
+        self.detection_result = None
         if self.detector is None:
             return None
         
@@ -51,7 +58,12 @@ class HandTracker:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         
         # Phát hiện hand landmarks
-        self.detection_result = self.detector.detect(mp_image)
+        # VIDEO mode tracks between frames instead of detecting each frame
+        # independently. MediaPipe requires strictly increasing milliseconds.
+        timestamp_ms = max(monotonic_ns() // 1_000_000, self._last_timestamp_ms + 1)
+        self._last_timestamp_ms = timestamp_ms
+        self.detection_result = None
+        self.detection_result = self.detector.detect_for_video(mp_image, timestamp_ms)
         return self.detection_result
 
     def get_landmarks(self, frame, draw=True):
@@ -63,7 +75,7 @@ class HandTracker:
             for hand_landmarks in self.detection_result.hand_landmarks:
                 current_hand = []
                 for id, lm in enumerate(hand_landmarks):
-                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    cx, cy = lm.x * w, lm.y * h
                     cz = lm.z  # Lấy tọa độ chiều sâu z
                     current_hand.append([id, cx, cy, cz]) # Thêm cz vào mảng
                 
@@ -76,7 +88,7 @@ class HandTracker:
 
     def _draw_landmarks(self, frame, current_hand):
         for id, cx, cy, cz in current_hand:  # Cập nhật unpacking 4 biến
-            cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
+            cv2.circle(frame, (int(cx), int(cy)), 5, (0, 255, 0), -1)
         
         # Danh sách các đường kết nối giữa các landmark
         connections = [
@@ -90,8 +102,8 @@ class HandTracker:
         
         # Vẽ các đường kết nối
         for start_idx, end_idx in connections:
-            start_point = (current_hand[start_idx][1], current_hand[start_idx][2])
-            end_point = (current_hand[end_idx][1], current_hand[end_idx][2])
+            start_point = tuple(int(value) for value in current_hand[start_idx][1:3])
+            end_point = tuple(int(value) for value in current_hand[end_idx][1:3])
             cv2.line(frame, start_point, end_point, (0, 255, 0), 2)
 
 # ==========================================
