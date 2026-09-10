@@ -1,5 +1,51 @@
 # Gesture integration review — 9 September 2026
 
+## Transition-shake stabilization
+
+The earlier target freeze started when a middle-finger opening signal or changed pose was observed. A hand shift just before that signal could already reach the OS cursor. The new pointer path buffers 100 ms of raw pointing positions, interpolated by timestamp, and discards the pending samples on a pose change, early opening signal, uncertainty, or reset. The click continues to use the actual visible cursor position; it does not silently rewind to a historical coordinate. A 2-pixel output deadzone suppresses tiny hover movements. Motion filters are re-seeded from the visible cursor and the newly observed raw input after a pause, avoiding an artificial velocity spike during resumption.
+
+Settings are `POINTER_BUFFER_MS` (0–250, default 100) and `POINTER_DEADZONE_PX` (0–10, default 2). This trades roughly 100 ms of pointing latency for protection against brief transition tremor. It cannot remove every tremor or infer intent when movement begins earlier than the buffer. Existing traces without the new settings replay with buffering/deadzone disabled, matching their recorded pointer configuration.
+
+Tests compare buffer-on and buffer-off runs of the same synthetic pre-click displacement at 10/15/30/60 FPS, plus discarded pending motion, intentional movement, stationary noise, and cursor resumption. Browser QA includes a 14-pixel target with a synthetic pre-click displacement. These checks are not a measurement of the user's live hand tremor.
+
+## Browser-history and intermittent-click follow-up
+
+The toolbar buttons highlighted in the new report mean browser history. The earlier plain Left/Right mapping was for slides and does not activate those buttons. `NAVIGATION_TARGET=browser` is now the application and mapper default: Alt+Left/Alt+Right on Windows/Linux, Command+Left/Command+Right on macOS. `slides` preserves the previous mapping. Old trace sessions without this setting retain their slide mapping when replayed. See [Chrome's official shortcut reference](https://support.google.com/chrome/answer/157179?hl=en).
+
+The new click screenshot reports `None`, so classification failed before a click could be sent. A screenshot cannot provide the original depth coordinates or temporal sequence. Code review and synthetic regressions reproduced related failures: the shared two-finger direction rule rejected oblique/slightly bent fingers, and three-consecutive-frame classification plus click dwell could prevent confirmation under intermittent uncertainty. After pointing, a separate click pose now accepts perspective/mild bends while requiring both raised fingers, non-hooked distal joints, and positively curled ring/pinky. Directional navigation keeps its stricter rules. Click confirmation is time-based, freezes the target, and must complete within a bounded window so sparse noise cannot accumulate into a click. Out-of-frame landmarks now produce an explicit hand-position hint when recognition is uncertain.
+
+Validation includes mirrored/oblique poses, 10/15/30/60 FPS, isolated unknown frames, sparse false detections, and gradual point-to-palm transitions. The `--desktop-history` browser check additionally used the **actual PyAutoGUI executor on Windows** against a uniquely titled isolated Chrome window: Back twice and Forward twice reached the exact expected local history entries. The helper refuses input unless that owned window is foreground and permits only Back/Forward. This establishes OS shortcut delivery, not live webcam recognition or click delivery. Other browser gesture checks still use synthetic hands and page-level input. Live landmark recordings remain needed to reproduce the exact screenshot session.
+
+## 10 September follow-up: contextual two-finger click and restored playback
+
+The reported screenshots showed recognized Thumbs Up rejected by a 400 ms recent-point gate, and recognized Fist intentionally doing nothing in Mouse mode. Both were interaction-layer defects, not evidence that MediaPipe failed to recognize those screenshots.
+
+Following the requested control change, active index pointing now selects a **two-finger single click**: extend the middle finger, hold briefly, and the cursor target is clicked once. Finger direction is ignored throughout this click interaction. A raw middle-finger bend/reach signal freezes the cursor while the finger begins opening, before full two-finger recognition, reducing transition drift. Point again to release/rearm. Show an open palm first to select scroll/arrows/zoom instead; all are available without changing Mouse mode. Bare two fingers at startup do nothing until Point or Palm establishes intent.
+
+Fist now toggles playback once after 600 ms of recognized holding in Mouse mode. Brief fist transitions cancel pending clicks without sending playback. The Windows application defaults to `playpause`, with configurable `k`/`space` fallback; navigation-only mode uses the same configured key. [YouTube's official keyboard guide](https://support.google.com/youtube/answer/7631406?hl=en) documents the media play/pause key. [PyAutoGUI's key list](https://pyautogui.readthedocs.io/en/latest/keyboard.html) and the installed Windows mapping support `playpause` (VK_MEDIA_PLAY_PAUSE). Media-session routing remains OS/browser-dependent.
+
+Optional thumb clicks now use the existing cursor without a recent-point deadline. Uncertain pose transitions allow 800 ms; frame stalls over 500 ms still reset immediately. Uncertain time does not count toward holds. Completed click/playback latches survive tracking resets to prevent duplicate actions from the same held gesture. A newly forming pinch cannot briefly activate pointing while the pinch-distance filter catches up.
+
+Regression coverage includes 10/15/30/60 FPS, all four two-finger directions in click context, repeated/held clicks, early target freeze, palm-versus-point activation, loss of context after hand loss, short/held fists, uncertain timing, replay, and application wiring. Browser QA now feeds synthetic landmarks through the production classifier/controller and dispatches its commands into isolated headless Chrome. Its counters verify two-finger single click, explicit double/right click, scrolling and a single playback-key event. This is **not** a webcam, PyAutoGUI desktop-injection, or Windows media-session test.
+
+Current controls and restart/testing instructions are in the README. The following sections are historical findings; their old Mouse-mode fist/scroll/zoom rules have been superseded.
+
+## 10 September update: Mouse mode
+
+Mouse mode is now the startup default. Index pointing controls the primary-monitor cursor, using adaptive smoothing. Thumbs-up is distinct from Fist: a short thumbs-up followed by Point sends a single click; a held thumbs-up sends one double click. Thumbs-down provides right click. Two vertical fingers scroll; palm/fist cancel pending mouse actions. The original controls remain in Navigation mode, selected with M or the Mode button.
+
+The current README and on-screen Help describe the new controls. The sections below document the earlier Navigation-only investigation, not the full current gesture scheme. In particular, the old `ARMED` label has been replaced with explicit LIVE INPUT/DRY RUN/PAUSED state, and Mouse pointing does not require an open-palm gate.
+
+The local browser practice fixture (`python main.py --practice`) has been checked in an isolated Chrome session for single click, double click, right click, and wheel scrolling, with no JavaScript errors. This checks the browser fixture, not live webcam recognition or PyAutoGUI's desktop input delivery. Camera-loop tests use fake frames and injected executors. Live testing remains necessary before claiming accuracy for different users or applications.
+
+Click tests cover 10/15/30/60 FPS, target locking, no speculative single click before double click, release debouncing, long holds, noisy transitions, hand loss, multiple hands, mode changes, enable/disable, pause/resume, malformed landmarks, backwards time/frame gaps, and physical-mouse takeover. Mouse-mode pinch cannot emit navigation zoom shortcuts. Trace version 2 records pointer coordinates and session controls, while replay remains dry run and still supports version 1.
+
+The click design is explicit: software cannot generally determine whether the user intends to select, open, or activate a target. The user chooses single or double click, and the OS/app assigns the resulting meaning. Pointer smoothing follows the [One Euro filter](https://gery.casiez.net/1euro/) approach; click delivery uses [PyAutoGUI's mouse API](https://pyautogui.readthedocs.io/en/latest/mouse.html). The current pointer mapping targets the primary display, consistent with [PyAutoGUI's documented monitor support](https://pyautogui.readthedocs.io/en/latest/index.html).
+
+Generated double clicks use an interval of at most 100 ms, reduced when necessary to fit inside the user's Windows setting read through [GetDoubleClickTime](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getdoubleclicktime). This does not change OS mouse settings.
+
+---
+
 The reviewed checkout matched `origin/feature/pyautogui` at `c654124` after fetching. The original 43 tests passed. They largely used isolated synthetic poses; many explicitly disabled smoothing and settling, so they could not establish live-camera reliability.
 
 ## Confirmed defects and fixes

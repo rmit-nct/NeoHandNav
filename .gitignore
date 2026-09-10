@@ -17,6 +17,7 @@ Thumbs.db
 
 # Private recordings and Microsoft Word lock files
 recordings/
+tmp/
 *.mp4
 *.mov
 *.avi

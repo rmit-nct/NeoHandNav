@@ -90,6 +90,10 @@ def fist_hand():
         (18, 19, 20),
     ):
         fold_finger(hand, pip, dip, tip)
+    # A real fist includes a folded thumb; the old fixture kept an open thumb.
+    hand[2][1:3] = [85, 170]
+    hand[3][1:3] = [92, 157]
+    hand[4][1:3] = [101, 168]
     return hand
 
 

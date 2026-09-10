@@ -16,7 +16,7 @@ class ActionCommand:
     """An OS action independent from the PyAutoGUI implementation."""
 
     kind: str
-    arguments: tuple[str | int, ...]
+    arguments: tuple[str | int | float, ...]
     description: str
 
 
@@ -54,6 +54,8 @@ class ActionMapper:
         fist_release_ms: int = 250,
         unknown_grace_ms: int = 350,
         max_frame_gap_seconds: float = 0.5,
+        play_pause_key: str = "space",
+        navigation_target: str = "browser",
         executor: Executor | None = None,
     ) -> None:
         if cooldown_ms < 0:
@@ -70,6 +72,10 @@ class ActionMapper:
             raise ValueError("unknown_grace_ms must be non-negative")
         if not isfinite(max_frame_gap_seconds) or max_frame_gap_seconds <= 0:
             raise ValueError("max_frame_gap_seconds must be positive and finite")
+        if play_pause_key not in ("playpause", "space", "k"):
+            raise ValueError("play_pause_key must be playpause, space or k")
+        if navigation_target not in ("browser", "slides"):
+            raise ValueError("navigation_target must be browser or slides")
 
         zoom_modifier = "command" if platform.system() == "Darwin" else "ctrl"
         self.actions_enabled = actions_enabled
@@ -95,8 +101,12 @@ class ActionMapper:
             Gesture.ZOOM_OUT: ActionCommand(
                 "hotkey", (zoom_modifier, "-"), "zoom out"
             ),
-            Gesture.FIST: ActionCommand("key", ("space",), "play or pause"),
+            Gesture.FIST: ActionCommand("key", (play_pause_key,), "play or pause"),
         }
+        if navigation_target == "browser":
+            modifier = "command" if platform.system() == "Darwin" else "alt"
+            self.commands[Gesture.PREVIOUS_PAGE] = ActionCommand("hotkey", (modifier,"left"), "browser back")
+            self.commands[Gesture.NEXT_PAGE] = ActionCommand("hotkey", (modifier,"right"), "browser forward")
         self._executor = executor or self._execute_with_pyautogui
         self.reset()
 
@@ -253,6 +263,10 @@ class ActionMapper:
             if action_family not in ("scroll", "zoom"):
                 self._ready_for_action = False
 
+        return self.execute(command)
+
+    def execute(self, command: ActionCommand) -> ActionResult:
+        """Execute an already gated command from navigation or mouse control."""
         if not self.actions_enabled:
             return ActionResult(command=command, executed=False)
 
@@ -281,6 +295,16 @@ class ActionMapper:
         return gesture.value
 
     @staticmethod
+    def _double_click_interval() -> float:
+        """Keep generated clicks inside the user's Windows double-click time."""
+        if platform.system() == "Windows":
+            import ctypes
+            milliseconds = ctypes.windll.user32.GetDoubleClickTime()
+            if milliseconds > 0:
+                return min(.10, milliseconds / 3000.0)
+        return .10
+
+    @staticmethod
     def _execute_with_pyautogui(command: ActionCommand) -> None:
         import pyautogui
 
@@ -293,5 +317,13 @@ class ActionMapper:
             pyautogui.scroll(int(command.arguments[0]), _pause=False)
         elif command.kind == "hotkey":
             pyautogui.hotkey(*(str(value) for value in command.arguments), _pause=False)
+        elif command.kind == "move":
+            pyautogui.moveTo(int(command.arguments[0]), int(command.arguments[1]), _pause=False)
+        elif command.kind == "click":
+            x, y, clicks, button = command.arguments
+            pyautogui.click(
+                int(x), int(y), clicks=int(clicks), button=str(button),
+                interval=ActionMapper._double_click_interval() if clicks == 2 else 0, _pause=False,
+            )
         else:
             raise ValueError(f"Unsupported action kind: {command.kind}")

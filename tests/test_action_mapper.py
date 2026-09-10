@@ -7,11 +7,23 @@ from backend.gesture_classifier import Gesture
 
 
 class ActionMapperTests(unittest.TestCase):
+    def test_browser_navigation_default_uses_platform_history_shortcuts(self):
+        from unittest.mock import patch
+        for system,modifier in (('Windows','alt'),('Linux','alt'),('Darwin','command')):
+            with patch('backend.action_mapper.platform.system',return_value=system):
+                mapper=ActionMapper(require_open_palm=False,cooldown_ms=0)
+                for pose,key,label in ((Gesture.PREVIOUS_PAGE,'left','browser back'),(Gesture.NEXT_PAGE,'right','browser forward')):
+                    command=mapper.commands[pose]
+                    self.assertEqual((command.kind,command.arguments,command.description),('hotkey',(modifier,key),label))
+
+    def test_invalid_navigation_target_is_rejected(self):
+        with self.assertRaises(ValueError): ActionMapper(navigation_target='guess')
+
     @staticmethod
     def legacy_mapper(**overrides) -> ActionMapper:
         """Build a mapper without the application-level palm gate."""
 
-        settings = {"require_open_palm": False}
+        settings = {"require_open_palm": False, "navigation_target": "slides"}
         settings.update(overrides)
         return ActionMapper(**settings)
 

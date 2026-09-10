@@ -106,12 +106,14 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(self.commands, [])
 
     def test_page_and_fist_are_one_shot_at_production_settings(self):
-        for hand, expected in ((two_finger_hand((1,0)), 'right'), (fist_hand(), 'space')):
+        import platform
+        modifier = 'command' if platform.system() == 'Darwin' else 'alt'
+        for hand, expected in ((two_finger_hand((1,0)), (modifier,'right')), (fist_hand(), ('space',))):
             with self.subTest(expected=expected):
                 self.setUp()
                 self.hold(copy_hand())
                 self.hold(hand, 2)
-                self.assertEqual([c.arguments for c in self.commands], [(expected,)])
+                self.assertEqual([c.arguments for c in self.commands], [expected])
 
     def test_short_fist_glitch_does_not_send_space(self):
         self.hold(copy_hand())

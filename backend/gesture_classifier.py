@@ -20,9 +20,13 @@ class Gesture(str, Enum):
     NONE = "none"
     OPEN_PALM = "open_palm"
     FIST = "fist"
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
     POINT = "point"
     PINCH = "pinch"
     TWO_FINGER = "two_finger"
+    # Interaction label assigned by the controller after active pointing.
+    TWO_FINGER_CLICK = "two_finger_click"
     PREVIOUS_PAGE = "previous_page"
     NEXT_PAGE = "next_page"
     # Backward-compatible aliases for code written before page controls became
@@ -91,6 +95,7 @@ class GestureClassifier:
         direction_stillness_radius: float = 0.10,
         max_frame_gap_seconds: float = 0.5,
         fist_settle_seconds: float = 0.15,
+        zoom_enabled: bool = True,
     ) -> None:
         if not 0 < ema_alpha <= 1:
             raise ValueError("ema_alpha must be between 0 and 1")
@@ -146,6 +151,7 @@ class GestureClassifier:
         self.direction_stillness_radius = direction_stillness_radius
         self.max_frame_gap_seconds = max_frame_gap_seconds
         self.fist_settle_seconds = fist_settle_seconds
+        self.zoom_enabled = zoom_enabled
         self.reset()
 
     def reset(self) -> None:
@@ -171,6 +177,8 @@ class GestureClassifier:
         landmarks: Sequence[Landmark],
         timestamp: float | None = None,
         image_width: float | None = None,
+        *,
+        click_context: bool = False,
     ) -> GestureResult:
         """Return the current stable shape or a pinch-distance zoom event.
 
@@ -245,6 +253,7 @@ class GestureClassifier:
         pinch_ratio = (
             self._distance_3d(points[4], points[8], depth_scale) / palm_scale
         )
+        observed_pinch_ratio = pinch_ratio
         pinch_ratio = self._ema_value(self._filtered_pinch_ratio, pinch_ratio)
         self._filtered_pinch_ratio = pinch_ratio
 
@@ -260,17 +269,54 @@ class GestureClassifier:
             self._angle_2d(points[mcp], points[pip], points[tip]) < 120
             for tip, _, pip, mcp in self._FINGERS[2:]
         )
+        if click_context and self._click_pose(points, extended, depth_scale):
+            # Click intent was established by pointing. It does not require
+            # parallel fingers, a screen direction, or 2D-only extension.
+            # PointerController owns the time-based click confirmation; do not
+            # add a second consecutive-frame debounce that resets on jitter.
+            self._reset_direction_settle()
+            self._pinch_active = False
+            self._pinch_anchor = None
+            self._pinch_start_frames = 0
+            self._candidate = Gesture.NONE
+            self._candidate_frames = 0
+            return GestureResult(Gesture.TWO_FINGER_CLICK, .85)
         raw_gesture, confidence = self._static_shape(
             extended,
             pinch_ratio,
             pinch_start_pose,
             two_finger_pose,
         )
+        if raw_gesture is Gesture.POINT and pinch_start_pose and observed_pinch_ratio <= self._PINCH_START_THRESHOLD:
+            # Smoothing may take several frames to catch a newly closed pinch.
+            # Do not move the cursor or consume the navigation gate meanwhile.
+            raw_gesture, confidence = Gesture.NONE, 0.0
         if raw_gesture is Gesture.FIST and not all(
             self._angle_2d(points[mcp], points[pip], points[tip]) < 120
             for tip, _, pip, mcp in self._FINGERS
         ):
             raw_gesture, confidence = Gesture.NONE, 0.0
+        if raw_gesture is Gesture.FIST:
+            # A thumb was previously ignored completely, so thumbs-up sent
+            # Space. Distinguish it from a closed thumb using palm-relative
+            # reach and the thumb's IP joint, for either hand.
+            thumb_straight = self._angle_3d(
+                points[2], points[3], points[4], depth_scale
+            ) >= 145
+            thumb_outside_palm = (
+                self._distance_3d(points[4], points[5], depth_scale) / palm_scale > .65
+                and self._distance_3d(points[0], points[4], depth_scale)
+                > self._distance_3d(points[0], points[2], depth_scale) * 1.15
+            )
+            if thumb_straight and thumb_outside_palm:
+                dx, dy = points[4][0] - points[2][0], points[4][1] - points[2][1]
+                length = hypot(dx, dy)
+                if length >= palm_scale * .35 and dy / length <= -.65:
+                    raw_gesture = Gesture.THUMBS_UP
+                elif length >= palm_scale * .35 and dy / length >= .65:
+                    raw_gesture = Gesture.THUMBS_DOWN
+                else:
+                    raw_gesture, confidence = Gesture.NONE, 0.0
         direction_is_settled = False
         if raw_gesture is Gesture.TWO_FINGER:
             directed_gesture, direction_confidence = self._two_finger_direction(
@@ -301,7 +347,7 @@ class GestureClassifier:
             pinch_start_pose=pinch_start_pose,
             pinch_continue_pose=pinch_continue_pose,
             timestamp=now,
-        )
+        ) if self.zoom_enabled else None
         if zoom is not None:
             self._candidate = Gesture.NONE
             self._candidate_frames = 0
@@ -499,6 +545,33 @@ class GestureClassifier:
     ) -> bool:
         index, middle, ring, pinky = extended_in_image
         return index and middle and not ring and not pinky and not any(extended[2:])
+
+    @classmethod
+    def _click_pose(cls, points, extended, depth_scale):
+        """A deliberate V after pointing, allowing perspective and mild bends.
+
+        Require both raised fingers and positive curled evidence for the other
+        pair. Depth helps oblique hands; distal bends still reject hooked fingers.
+        This rule is never used to initiate scrolling or browser navigation.
+        """
+        for index, (tip, dip, pip, mcp) in enumerate(cls._FINGERS):
+            bend = cls._angle_3d(points[mcp], points[pip], points[tip], depth_scale)
+            distal = cls._angle_3d(points[pip], points[dip], points[tip], depth_scale)
+            bones = sum(cls._distance_3d(points[a], points[b], depth_scale)
+                        for a,b in ((mcp,pip),(pip,dip),(dip,tip)))
+            straightness = cls._distance_3d(points[mcp], points[tip], depth_scale)/max(bones,1e-6)
+            if index < 2:
+                raised = (bend >= 125 and distal >= 120 and straightness >= .82
+                          and cls._distance_3d(points[0], points[tip], depth_scale)
+                          > cls._distance_3d(points[0], points[pip], depth_scale)*1.03)
+                if not (extended[index] or raised):
+                    return False
+            elif (extended[index] or not (
+                bend < 120 or cls._angle_2d(points[mcp], points[pip], points[tip]) < 120
+                or straightness < .65
+            )):
+                return False
+        return True
 
     def _two_finger_direction(
         self,

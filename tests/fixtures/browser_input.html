@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEO HandNav — Browser input practice</title>
+<style>
+  *{box-sizing:border-box}body{margin:0;background:#f3f6f9;color:#172c3e;font:17px/1.55 system-ui,sans-serif}
+  main{max-width:980px;margin:auto;padding:42px 28px 100px}h1{font-size:40px;line-height:1.12;margin:12px 0}h2{font-size:23px}
+  .eyebrow{font-size:13px;letter-spacing:.12em;color:#26745b;font-weight:750}.intro{max-width:720px;color:#526475}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:28px 0}
+  button,.target{font:inherit;text-align:left;border:2px solid #d5e0e7;border-radius:14px;padding:25px;background:white;color:inherit;min-height:175px;cursor:pointer}
+  button:hover,.target:hover{border-color:#288b69;background:#f0fff7}button:focus-visible,.target:focus-visible{outline:4px solid #7aaeff;outline-offset:3px}
+  strong{display:block;font-size:23px;margin-bottom:12px}.count{font-size:37px;font-weight:750;color:#227f60;display:block;margin-top:16px}
+  .panel{background:white;border:1px solid #d5e0e7;border-radius:14px;padding:22px;margin:18px 0}
+  .meters{display:flex;gap:22px;flex-wrap:wrap;font:14px ui-monospace,monospace;position:sticky;top:0;z-index:2;background:#172c3e;color:white;padding:16px 20px;border-radius:8px}
+  #log{font:14px/1.6 ui-monospace,monospace;white-space:pre-wrap;max-height:160px;overflow:auto}
+  .scroll-area{height:300px;overflow:auto;border:2px solid #b7ccc4;border-radius:12px;background:#f5fcf8}
+  .marker{height:180px;padding:24px;border-bottom:1px dashed #9ebdae}.marker:nth-child(even){background:#e5f3eb}
+  .hint{font-size:14px;color:#526475}.foot{margin-top:70px;color:#526475}.reset{min-height:0;padding:9px 15px;margin-top:10px}
+  @media(max-width:700px){.grid{grid-template-columns:1fr}h1{font-size:32px}}
+</style>
+<main>
+  <div class="eyebrow">NEO HANDNAV / LOCAL PRACTICE</div>
+  <h1>See what reaches your browser.</h1>
+  <p class="intro">Start HandNav in <b>Mouse mode</b> with <b>Live input</b>. Point to position the cursor over a card. Keep this page visible beside the camera preview. This page also accepts your physical mouse.</p>
+  <div class="meters" aria-live="polite"><span id="pointer">Pointer: waiting</span><span id="wheel">Wheel: 0</span><span id="focus">Page: focused</span></div>
+  <div class="grid">
+    <button id="single"><strong>Single click</strong>Point here, then extend your middle finger too. Hold briefly: one click. Fold it to move again.<span class="count" id="singles">0</span></button>
+    <div class="target" id="double" role="button" tabindex="0" aria-label="Double click test"><strong>Double click</strong>Point here. Hold thumbs-up until HandNav's progress bar fills.<span class="count" id="doubles">0</span></div>
+    <div class="target" id="right" role="button" tabindex="0" aria-label="Right click test"><strong>Right click</strong>Point here. Show thumbs-down briefly, then point again.<span class="count" id="rights">0</span></div>
+  </div>
+  <p class="hint">A real double click produces two click events and then a dblclick event. On the middle card, only the dblclick event increments the counter. The browser does not choose the gesture for you.</p>
+  <p class="hint">Two fingers after pointing mean CLICK, regardless of their direction. To scroll or send arrows, show an open palm first and wait for READY. The cursor stays at the last target.</p>
+  <section class="panel"><h2>Scroll inside this box</h2><p>Point inside the box. Show an open palm until READY, then hold two fingers downward. Point or show an open palm to stop. Show palm again before switching direction.</p>
+    <div class="scroll-area" id="scrollbox" tabindex="0" aria-label="Scroll test area">
+      <div class="marker">1 — Start here</div><div class="marker">2 — Scroll received</div><div class="marker">3 — Keep scrolling</div><div class="marker">4 — Almost there</div><div class="marker">5 — Bottom reached</div>
+    </div><p id="scrollvalue">Box scroll position: 0 px</p>
+  </section>
+  <section class="panel"><h2>Playback command check</h2><p>Hold Fist until HandNav's bar fills. This panel logs keyboard playback commands when this page receives them. For actual video playback, test an active YouTube video; the Windows media key may be routed directly to its media session.</p>
+    <p id="playback" tabindex="0">Simulation: playing — playback commands: 0</p>
+  </section>
+  <section class="panel"><h2>Browser Back / Forward</h2><p><a id="history-next" href="history_next.html">Open history test page 2</a>, then show palm until READY and two fingers left to return here. Show palm again and two fingers right to go Forward.</p><p>The browser must be focused. A grey Back/Forward button means there is no history entry in that direction.</p></section>
+  <section class="panel"><h2>Received events</h2><div id="log" aria-live="polite">No clicks received yet.</div><button class="reset" id="reset">Reset counters</button></section>
+  <p class="foot">No camera access, server, account, analytics, or network requests. This page observes browser input only. A passing test verifies this input path; other websites still decide what their own buttons and keyboard shortcuts do.</p>
+</main>
+<script>
+  const counts={single:0,double:0,right:0,wheel:0,playback:0};const rows=[];
+  const get=id=>document.getElementById(id);
+  function log(value){rows.unshift(new Date().toLocaleTimeString()+'  '+value);rows.length=Math.min(rows.length,12);get('log').textContent=rows.join('\n')}
+  get('single').addEventListener('click',e=>{get('singles').textContent=++counts.single;log('Single target: click, detail='+e.detail)});
+  get('double').addEventListener('click',e=>log('Double target: click, detail='+e.detail));
+  get('double').addEventListener('dblclick',()=>{get('doubles').textContent=++counts.double;log('Double target: dblclick received')});
+  get('right').addEventListener('contextmenu',e=>{e.preventDefault();get('rights').textContent=++counts.right;log('Right target: contextmenu received')});
+  document.addEventListener('keydown',e=>{if(['MediaPlayPause',' ','k'].includes(e.key)){e.preventDefault();counts.playback++;get('playback').textContent=`Simulation: ${counts.playback%2?'paused':'playing'} — playback commands: ${counts.playback}`;log('Playback command: '+e.key)}});
+  document.addEventListener('mousemove',e=>{get('pointer').textContent=`Pointer: ${e.clientX}, ${e.clientY}`});
+  document.addEventListener('wheel',e=>{get('wheel').textContent='Wheel: '+(++counts.wheel)+' ('+(e.deltaY>0?'down':'up')+')'},{passive:true});
+  get('scrollbox').addEventListener('scroll',()=>get('scrollvalue').textContent='Box scroll position: '+Math.round(get('scrollbox').scrollTop)+' px');
+  window.addEventListener('focus',()=>get('focus').textContent='Page: focused');
+  window.addEventListener('blur',()=>get('focus').textContent='Page: not focused');
+  get('reset').addEventListener('click',()=>{for(const key of Object.keys(counts))counts[key]=0;for(const id of ['singles','doubles','rights'])get(id).textContent='0';rows.length=0;get('log').textContent='Counters reset.';get('wheel').textContent='Wheel: 0';get('playback').textContent='Simulation: playing — playback commands: 0'});
+</script>
+</html>
