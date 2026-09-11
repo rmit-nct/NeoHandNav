@@ -1,5 +1,11 @@
 # Gesture integration review — 9 September 2026
 
+## Fist playback follow-up — 11 September
+
+The user confirmed `SENT: play or pause` while YouTube kept playing. That identifies delivery/player handling rather than an unfinished hold in this case. The local `.env` now selects `PLAY_PAUSE_KEY=k`, YouTube's player shortcut, instead of the Windows global media key. Explicit `k`/`space` playback commands prepare the window under the pointer before typing; a blocked target produces WAITING without a fallback toggle. This does not identify the active website or focus a video within a page: the user should focus the YouTube player first, avoiding an active search/comment text field. Other installations keep the existing media-key default.
+
+Separately, an unfinished fist previously became consumed on tracking reset. It now restarts its complete dwell after recovery. Completed fists remain locked until a deliberate palm/point release, preventing double toggles. Status says `Fist completed` and refers to Last input instead of claiming a key was sent before execution. Regression tests cover interrupted and completed holds, target preparation ordering, and blocked playback without key emission. All 145 tests pass; the user's live YouTube playback remains unverified.
+
 ## Recognized scroll with no page movement — 10 September
 
 Follow-up screenshot showed `ACTIVE: Scroll Down` and `SENT: scroll down (-1,)`. Inspection of the installed PyAutoGUI Windows `_scroll` implementation revealed that it passes the argument directly as raw `dwData`, without multiplying by WHEEL_DELTA. Thus the configured one-notch command was actually 1/120 of a notch. Windows delivery now uses `SendInput` with explicit `notches * 120`, verifies that the event was inserted, and preserves PyAutoGUI's fail-safe check. Other platforms retain PyAutoGUI scrolling. See [Microsoft's wheel-unit definition](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mouse_event).

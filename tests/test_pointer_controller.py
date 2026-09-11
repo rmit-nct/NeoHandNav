@@ -148,6 +148,28 @@ class PointerTests(unittest.TestCase):
             self.hold(gesture,2.)
             self.assertEqual(len(self.commands),1)
 
+    def test_unfinished_fist_restarts_full_hold_after_tracking_reset(self):
+        for fps in (10,15,30,60):
+            with self.subTest(fps=fps):
+                self.setUp()
+                self.hold(Gesture.FIST,.3,fps)
+                self.pointer.reset()
+                self.hold(Gesture.FIST,.3,fps)
+                self.assertEqual(self.commands,[])
+                self.hold(Gesture.FIST,.8,fps)
+                self.assertEqual([c.arguments for c in self.commands],[('playpause',)])
+                self.pointer.reset()
+                self.hold(Gesture.FIST,1.,fps)
+                self.assertEqual(len(self.commands),1)
+
+    def test_unfinished_fist_recovers_after_long_uncertainty(self):
+        self.hold(Gesture.FIST,.3)
+        self.hold(Gesture.NONE,1.)
+        self.hold(Gesture.FIST,.3)
+        self.assertEqual(self.commands,[])
+        self.hold(Gesture.FIST,.8)
+        self.assertEqual([c.arguments for c in self.commands],[('playpause',)])
+
     def test_cancelled_thumb_cannot_restart_until_released(self):
         self.hold(Gesture.THUMBS_UP,.4)
         self.hold(Gesture.NONE,1.)

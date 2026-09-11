@@ -98,7 +98,9 @@ class PointerController:
         # Losing tracking or resetting controls must not repeat a held click or
         # playback toggle. A deliberate point/palm releases these latches.
         self._click_consumed = getattr(self, '_click_consumed', False) or getattr(self, '_click_started', None) is not None
-        self._fist_consumed = getattr(self, '_fist_consumed', False) or getattr(self, '_fist_started', None) is not None
+        # An unfinished fist has emitted no toggle. Restart its full dwell on
+        # recovery instead of locking it as though playback had been toggled.
+        self._fist_consumed = getattr(self, '_fist_consumed', False)
         self._last_time = None
         self._point_since = None
         self._last_point = None
@@ -350,7 +352,7 @@ class PointerController:
         self._last_scroll = None
         if gesture is Gesture.FIST:
             if self._fist_consumed:
-                self.status = "Play/pause sent; show palm or point before another fist"
+                self.status = "Fist completed; show palm or point to rearm (see Last input)"
                 return None
             if self._fist_started is None:
                 self._fist_started = now
@@ -358,7 +360,7 @@ class PointerController:
             self.status = "Hold fist until bar fills: play/pause once"
             if self.progress >= 1:
                 self._fist_consumed = True
-                self.status = "Play/pause sent; show palm or point before another fist"
+                self.status = "Fist completed; show palm or point to rearm (see Last input)"
                 return ActionCommand("key", ("playpause",), "play or pause")
             return None
         self.status = ("Open palm: movement and pending clicks stopped" if gesture is Gesture.OPEN_PALM

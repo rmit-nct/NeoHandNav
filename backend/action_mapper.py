@@ -319,6 +319,10 @@ class ActionMapper:
         # Cooldowns above pace commands. The default 100 ms post-call sleep
         # would freeze camera capture on every action; bypass only that sleep.
         if command.kind == "key":
+            if command.description == "play or pause" and command.arguments[0] in ("k", "space"):
+                from backend.scroll_target import prepare_scroll_target
+                pyautogui.failSafeCheck()
+                prepare_scroll_target()
             pyautogui.press(str(command.arguments[0]), _pause=False)
         elif command.kind == "scroll":
             from backend.scroll_target import prepare_scroll_target

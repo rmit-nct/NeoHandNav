@@ -102,5 +102,13 @@ class GestureController:
             lm[1] < 0 or lm[1] >= image_width or lm[2] < 0 or lm[2] >= image_height
             for lm in hands[0]
         ):
-            self.pointer.status = "Hand outside camera: bring wrist and all fingers into view"
+            self.pointer.status = "Hand clipped: move back, then point again before clicking"
+        elif result.gesture is Gesture.POINT and not self.pointer.suspended and any(
+            lm[1] < image_width * .04 or lm[1] >= image_width * .96
+            or lm[2] < image_height * .04 or lm[2] >= image_height * .96
+            for lm in hands[0]
+        ):
+            # Warn before a pointing-to-click transition clips the lower hand.
+            # This is feedback only: keep the pointer mapping and click gates.
+            self.pointer.status = "Hand near camera edge: move back to keep whole hand visible"
         return result, action
