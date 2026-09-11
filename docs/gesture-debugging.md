@@ -1,5 +1,19 @@
 # Gesture integration review — 9 September 2026
 
+## Recognized scroll with no page movement — 10 September
+
+Follow-up screenshot showed `ACTIVE: Scroll Down` and `SENT: scroll down (-1,)`. Inspection of the installed PyAutoGUI Windows `_scroll` implementation revealed that it passes the argument directly as raw `dwData`, without multiplying by WHEEL_DELTA. Thus the configured one-notch command was actually 1/120 of a notch. Windows delivery now uses `SendInput` with explicit `notches * 120`, verifies that the event was inserted, and preserves PyAutoGUI's fail-safe check. Other platforms retain PyAutoGUI scrolling. See [Microsoft's wheel-unit definition](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mouse_event).
+
+The improved native Chrome test measures wheel events, not merely nonzero page movement: the old one-unit pulse yielded about 1.04 CSS pixels and the corrected notch about 125, with correct signs in both directions. All 141 tests pass. This confirms a real delivery-unit bug; live gesture operation on YouTube Shorts still needs verification. The earlier focus fix remains in place, and click stabilization is unchanged.
+
+The reported label is `Scroll Down`, so recognition alone does not establish that wheel input reached the page. Synthetic Point → Palm → Down sequences produce the same wheel commands with the pointer buffer enabled and disabled at 10/15/30/60 FPS. The buffer remains unchanged.
+
+Windows scroll delivery now resolves the window under the actual pointer and requests foreground focus before sending the wheel. It never clicks to obtain focus or changes system settings. A pointer over HandNav, a missing target, or a refused focus request produces `WAITING` with an actionable reason, without disarming live input. The reason is also recorded in traces. This addresses a possible focus-related delivery failure; the user's exact failure has not been reproduced from a live trace.
+
+Validation: 138 unit/integration tests pass, including mocked focus success/refusal, preview targeting, recovery, and no wheel emission when blocked. `node scripts/check_browser_input.cjs --desktop-scroll` also passed actual Windows PyAutoGUI down/up input in an isolated foreground Chrome page. The native check does not yet reproduce an inactive browser behind the camera preview; that focus path has mocked coverage.
+
+To test: restart HandNav, point inside the browser's scrollable content, show palm until READY, then hold two fingers downward. `SENT` means input was emitted, not that the page necessarily moved (the page can already be at its bottom or the pointer can be over another scroll region). `WAITING` explains a target/focus problem; `SHOW OPEN PALM` means the gesture has not been armed.
+
 ## Transition-shake stabilization
 
 The earlier target freeze started when a middle-finger opening signal or changed pose was observed. A hand shift just before that signal could already reach the OS cursor. The new pointer path buffers 100 ms of raw pointing positions, interpolated by timestamp, and discards the pending samples on a pose change, early opening signal, uncertainty, or reset. The click continues to use the actual visible cursor position; it does not silently rewind to a historical coordinate. A 2-pixel output deadzone suppresses tiny hover movements. Motion filters are re-seeded from the visible cursor and the newly observed raw input after a pause, avoiding an artificial velocity spike during resumption.

@@ -27,9 +27,14 @@ class ActionResult:
     command: ActionCommand
     executed: bool
     error: str | None = None
+    blocked_reason: str | None = None
 
 
 Executor = Callable[[ActionCommand], None]
+
+
+class InputTargetUnavailable(Exception):
+    """A recoverable target/focus problem; live control stays enabled."""
 
 
 class ActionMapper:
@@ -272,6 +277,8 @@ class ActionMapper:
 
         try:
             self._executor(command)
+        except InputTargetUnavailable as exc:
+            return ActionResult(command=command, executed=False, blocked_reason=str(exc))
         except Exception as exc:  # keep the camera loop alive on OS errors
             # In particular, never auto-resume after PyAutoGUI's fail-safe.
             self.set_actions_enabled(False)
@@ -314,7 +321,14 @@ class ActionMapper:
         if command.kind == "key":
             pyautogui.press(str(command.arguments[0]), _pause=False)
         elif command.kind == "scroll":
-            pyautogui.scroll(int(command.arguments[0]), _pause=False)
+            from backend.scroll_target import prepare_scroll_target
+            pyautogui.failSafeCheck()
+            prepare_scroll_target()
+            if platform.system() == "Windows":
+                from backend.windows_wheel import send_wheel
+                send_wheel(int(command.arguments[0]))
+            else:
+                pyautogui.scroll(int(command.arguments[0]), _pause=False)
         elif command.kind == "hotkey":
             pyautogui.hotkey(*(str(value) for value in command.arguments), _pause=False)
         elif command.kind == "move":

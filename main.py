@@ -204,6 +204,7 @@ def main() -> int:
                     "arguments": action.command.arguments if action else None,
                     "executed": action.executed if action else False,
                     "error": action.error if action else None,
+                    "blocked_reason": action.blocked_reason if action else None,
                 }) + "\n")
             if action is not None and (action.command.kind != "move" or action.error):
                 last_action = action
@@ -211,6 +212,8 @@ def main() -> int:
                 state = "executed" if action.executed else "dry run"
                 if action.error:
                     state = f"error: {action.error}"
+                elif action.blocked_reason:
+                    state = f"waiting: {action.blocked_reason}"
                 print(f"{action.command.description}: {state}")
             elif now - last_action_at > 3 and not (last_action and last_action.error):
                 last_action = None

@@ -160,7 +160,7 @@ class PipelineTests(unittest.TestCase):
 class ExecutorTests(unittest.TestCase):
     def test_all_commands_keep_failsafe_and_skip_post_call_sleep(self):
         fake = Mock(FAILSAFE=False)
-        with patch.dict('sys.modules', {'pyautogui': fake}):
+        with patch.dict('sys.modules', {'pyautogui': fake}), patch('backend.scroll_target.prepare_scroll_target'), patch('backend.action_mapper.platform.system', return_value='Linux'):
             for command in (ActionCommand('key',('space',),'play'),
                             ActionCommand('scroll',(1,),'scroll'),
                             ActionCommand('hotkey',('ctrl','+'),'zoom')):

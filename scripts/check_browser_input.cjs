@@ -134,14 +134,29 @@ const { chromium } = require(process.env.NEO_PLAYWRIGHT_PACKAGE || 'playwright')
         await tab.goto('about:blank');
         await tab.setContent('<title>'+token+'</title><body style="height:6000px;background:linear-gradient(#e9f7ff,#467f90)"><h1>NEO isolated wheel delivery check</h1></body>');
         await tab.bringToFront();
+        await tab.evaluate(()=>{
+          window.wheelEvents=[];
+          addEventListener('wheel',e=>wheelEvents.push({delta:e.deltaY,mode:e.deltaMode}),{passive:true});
+        });
+        const reference=spawnSync(python,['-m','scripts.desktop_scroll_input'],{
+          cwd:root,encoding:'utf8',input:JSON.stringify({title_token:token,delta:-1,raw_reference:true})});
+        assert.equal(reference.status,0,reference.stderr);
+        await tab.waitForFunction(()=>wheelEvents.length>0);
+        const rawDelta=await tab.evaluate(()=>wheelEvents[0].delta);
         for (const delta of [-1,1]) {
           const before=await tab.evaluate(()=>scrollY);
+          await tab.evaluate(()=>wheelEvents=[]);
           const sent=spawnSync(python,['-m','scripts.desktop_scroll_input'],{
             cwd:root,encoding:'utf8',input:JSON.stringify({title_token:token,delta})});
           assert.equal(sent.status,0,sent.stderr);
           await tab.waitForFunction(({before,delta})=>delta<0?scrollY>before:scrollY<before,{before,delta},{timeout:5000});
+          await tab.waitForFunction(()=>wheelEvents.length>0);
+          const event=await tab.evaluate(()=>wheelEvents[0]);
+          assert.equal(Math.sign(event.delta),-delta);
+          assert.ok(Math.abs(event.delta/rawDelta)>100,'Native notch must exceed the old raw-unit pulse by approximately 120x');
+          console.log(`PASS: native wheel delta ${event.delta}; old one-unit delta ${rawDelta}.`);
         }
-        console.log('PASS: actual Windows PyAutoGUI wheel input scrolls Chrome down and up.');
+        console.log('PASS: actual Windows native wheel input scrolls Chrome down and up with full-notch deltas.');
       } finally { await desktop.close(); }
     }
   } finally {

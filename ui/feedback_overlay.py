@@ -63,8 +63,8 @@ class FeedbackOverlay:
         cv2.rectangle(canvas,(12,86),(12+round((width-24)*min(1.,max(0.,progress))),92),color,-1)
         message = "Last input: none"
         if last_action:
-            prefix = "ERROR" if last_action.error else "SENT" if last_action.executed else "DRY RUN"
-            detail = last_action.error or f"{last_action.command.description} {last_action.command.arguments}"
+            prefix = "ERROR" if last_action.error else "WAITING" if last_action.blocked_reason else "SENT" if last_action.executed else "DRY RUN"
+            detail = last_action.error or last_action.blocked_reason or f"{last_action.command.description} {last_action.command.arguments}"
             message = f"{prefix}: {detail}"
         self.text(canvas,message,12,116,width-24)
         if mode == "mouse":

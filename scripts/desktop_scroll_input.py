@@ -11,6 +11,9 @@ def main():
     request=json.load(sys.stdin)
     token=request['title_token']
     delta=request['delta']
+    raw_reference=request.get('raw_reference', False)
+    if type(raw_reference) is not bool:
+        raise ValueError('raw_reference must be boolean')
     if sys.platform!='win32' or not token.startswith('NEO-SCROLL-CHECK-') or len(token)<40:
         raise ValueError('Expected a Windows test session token')
     if type(delta) is not int or delta not in (-1,1):
@@ -37,6 +40,9 @@ def main():
     mapper=ActionMapper(actions_enabled=True)
     for command in (ActionCommand('move',(centre.x,centre.y),'test pointer'),
                     ActionCommand('scroll',(delta,),'test scroll')):
+        if command.kind == 'scroll' and raw_reference:
+            pyautogui.scroll(delta, _pause=False)
+            continue
         result=mapper.execute(command)
         if result.error or not result.executed:
             raise RuntimeError(result.error or 'Input not sent')
