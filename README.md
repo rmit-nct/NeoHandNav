@@ -1,6 +1,6 @@
 # NEO HandNav
 
-NEO HandNav is a Python desktop app that uses a webcam to control the mouse, browser navigation, scrolling, zoom, and media playback with hand gestures.
+NEO HandNav is a Python desktop app that uses a webcam to control the mouse, browser navigation, scrolling, and media playback with hand gestures.
 
 ## Requirements
 
@@ -77,7 +77,6 @@ Mouse mode is the default.
 | Hold fist | Play/pause once |
 | Open palm until `READY`, then two fingers up/down | Scroll up/down |
 | Open palm until `READY`, then two fingers left/right | Browser Back/Forward |
-| Open palm until `READY`, then pinch and spread/close | Zoom in/out |
 | Open palm | Stop movement, cancel pending input, and arm navigation |
 
 The gesture before two fingers determines the action:
