@@ -20,11 +20,11 @@ class PointerSettings:
     margin: float = .15
     min_cutoff: float = 1.5
     speed_coefficient: float = 6.0
-    point_hold_seconds: float = .18
+    point_hold_seconds: float = .12
     motion_buffer_seconds: float = .10
     pointer_deadzone_pixels: float = 2.
     click_min_seconds: float = .15
-    two_finger_click_seconds: float = .18
+    two_finger_click_seconds: float = .12
     click_confirmation_window_seconds: float = .6
     double_click_hold_seconds: float = .9
     transition_grace_seconds: float = .8

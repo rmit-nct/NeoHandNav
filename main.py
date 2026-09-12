@@ -91,6 +91,8 @@ def main() -> int:
     actions_enabled = _env_bool("ACTIONS_ENABLED", False) and not args.dry_run
     mode = args.mode or os.getenv("CONTROL_MODE", "mouse").strip().lower()
     pointer_settings = PointerSettings(
+        point_hold_seconds=float(os.getenv("POINT_HOLD_MS", "120"))/1000,
+        two_finger_click_seconds=float(os.getenv("CLICK_HOLD_MS", "120"))/1000,
         margin=float(os.getenv("POINTER_MARGIN", ".15")),
         min_cutoff=float(os.getenv("POINTER_MIN_CUTOFF", "1.5")),
         speed_coefficient=float(os.getenv("POINTER_SPEED_COEFFICIENT", "6")),

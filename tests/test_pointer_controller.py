@@ -55,6 +55,30 @@ class PointerTests(unittest.TestCase):
     def clicks(self):
         return [c for c in self.commands if c.kind=='click']
 
+    def test_quick_click_rearms_without_duplicate_or_cursor_drift(self):
+        for fps in (15,30,60):
+            with self.subTest(fps=fps):
+                self.setUp()
+                self.hold(Gesture.POINT,.6,fps)
+                target=self.pointer.position
+                self.commands=[]
+                self.hold(Gesture.TWO_FINGER_CLICK,.18,fps)
+                self.assertEqual([c.arguments for c in self.clicks()],[(*target,1,'left')])
+                self.hold(Gesture.TWO_FINGER_CLICK,.7,fps)
+                self.assertEqual(len(self.clicks()),1)
+                self.hold(Gesture.POINT,.18,fps)
+                self.hold(Gesture.TWO_FINGER_CLICK,.18,fps)
+                self.assertEqual([c.arguments for c in self.clicks()],[(*target,1,'left')]*2)
+
+    def test_one_frame_two_finger_glitch_never_clicks(self):
+        for fps in (10,15,30,60):
+            with self.subTest(fps=fps):
+                self.setUp()
+                self.hold(Gesture.POINT,.6,fps)
+                self.hold(Gesture.TWO_FINGER_CLICK,1/fps,fps)
+                self.hold(Gesture.OPEN_PALM,.4,fps)
+                self.assertEqual(self.clicks(),[])
+
     def test_point_moves_without_open_palm_and_never_clicks(self):
         self.hold(Gesture.POINT,1.)
         self.assertTrue(any(c.kind=='move' for c in self.commands))

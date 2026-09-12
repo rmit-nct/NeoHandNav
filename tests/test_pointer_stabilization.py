@@ -76,7 +76,8 @@ class StabilizationTests(unittest.TestCase):
                 first_move=(i,command);break
         self.assertIsNotNone(first_move)
         frame,command=first_move
-        self.assertGreaterEqual((frame-50)/30,.26)
+        self.assertGreaterEqual((frame-50)/30,
+                                p.settings.point_hold_seconds+p.settings.motion_buffer_seconds)
         self.assertLess(math.dist(command.arguments,target),40)
 
     def test_buffer_and_deadzone_settings_validate_bounds(self):

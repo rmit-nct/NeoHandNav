@@ -1,5 +1,11 @@
 # Gesture integration review — 9 September 2026
 
+## Click debounce review — 11 September
+
+Point arming/rearming and two-finger confirmation now default to 120 ms each, down from 180 ms. Main exposes `POINT_HOLD_MS` and `CLICK_HOLD_MS`; old traces missing these settings retain 180 ms during replay. The 100 ms motion buffer, single-click latch, palm navigation gate, fist timing, and OS delivery code are unchanged in this adjustment.
+
+Validation: 147 tests passed, including quick click/rearm sequences at 15/30/60 FPS, one-frame rejection at 10/15/30/60 FPS, sparse detections, and target stabilization. The resume test now checks the configured point hold plus buffer instead of the old hard-coded timing. Synthetic gesture-to-browser click, double/right click, scroll and playback-event checks passed. Native history and wheel checks both stopped at their foreground-window guard without emitting input; this run does not revalidate native delivery or live-camera reliability. The previously successful native wheel/history checks remain historical evidence only.
+
 ## Fist playback follow-up — 11 September
 
 The user confirmed `SENT: play or pause` while YouTube kept playing. That identifies delivery/player handling rather than an unfinished hold in this case. The local `.env` now selects `PLAY_PAUSE_KEY=k`, YouTube's player shortcut, instead of the Windows global media key. Explicit `k`/`space` playback commands prepare the window under the pointer before typing; a blocked target produces WAITING without a fallback toggle. This does not identify the active website or focus a video within a page: the user should focus the YouTube player first, avoiding an active search/comment text field. Other installations keep the existing media-key default.

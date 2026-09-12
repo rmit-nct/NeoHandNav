@@ -21,6 +21,8 @@ def replay(path: Path) -> dict:
         settings.setdefault("navigation_target", "slides")
         settings["actions_enabled"] = False
         pointer_settings = dict(session.get("pointer", {}))
+        pointer_settings.setdefault("point_hold_seconds", .18)
+        pointer_settings.setdefault("two_finger_click_seconds", .18)
         # Traces made before motion buffering used immediate filtered movement.
         pointer_settings.setdefault("motion_buffer_seconds", 0.)
         pointer_settings.setdefault("pointer_deadzone_pixels", 0.)
