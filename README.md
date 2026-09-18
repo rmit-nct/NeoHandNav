@@ -141,3 +141,8 @@ Detailed engineering notes and trace instructions are available in [docs/gesture
 ## Technology
 
 Python 3.11, MediaPipe, OpenCV, PyAutoGUI, and python-dotenv.
+
+## Demo Video
+https://rmiteduau-my.sharepoint.com/:v:/g/personal/s3980826_rmit_edu_vn/IQDdGNNCtDj5QLtM2b9LuSchAZI2mlghXVfH18mOFPB-kvQ?nav=eyJyZWZlcnJhbEluZm8iOnsicmVmZXJyYWxBcHAiOiJPbmVEcml2ZUZvckJ1c2luZXNzIiwicmVmZXJyYWxBcHBQbGF0Zm9ybSI6IldlYiIsInJlZmVycmFsTW9kZSI6InZpZXciLCJyZWZlcnJhbFZpZXciOiJNeUZpbGVzTGlua0NvcHkifX0&e=GQeDba
+
+
